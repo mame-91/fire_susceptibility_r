@@ -1,0 +1,896 @@
+---
+title: "METHODS_NEGATIVE_CONTROLS"
+author: "Melinda Manczinger"
+date: "`r Sys.Date()`"
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+output: pdf_document
+urlcolor: blue
+---
+
+## METHODS - MATERIALS SECTION - NEGATIVE CONTROLS
+
+##### Step 1 - Loading the previously created negative controls data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+setwd("~/Desktop/Forest_project")
+negative_controls <- readRDS("negative_controls.rds")
+```
+
+##### Step 2 - Assigning 0 to control points
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Fire points as 0
+negative_controls$fire_points <- 0
+
+# Separating acq_Y and acq_M for further analysis
+negative_controls$acq_date_Y <- substr(negative_controls$acq_date, 1, 4)
+negative_controls$acq_date_M <- substr(negative_controls$acq_date, 6, 7)
+```
+
+##### Step 3 - Loading elevation
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(terra)
+elevation <- rast("elevation_merged.tif")
+vector <- vect(negative_controls, geom = c("longitude", "latitude"))
+negative_controls$elevation <- extract(elevation, vector)
+
+hist(negative_controls$elevation$srtm_40_02)
+
+# Data cleansing
+negative_controls$elevation$ID <- NULL
+negative_controls$elevation <- negative_controls$elevation$srtm_40_02
+
+table(is.na(negative_controls$elevation)) # no missing value
+```
+
+Note: no missing value found.
+
+##### Step 4 - Loading slope
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(sf)
+slope_TIF <- rast("Slope/slope_1KMmd_GMTEDmd.tif")
+roi <- read_sf("Study area_shp/all_regions_merge.shp")
+slope <- crop(slope_TIF, roi)
+
+negative_controls$slope <- terra::extract(slope, vector)
+hist(negative_controls$slope$slope_1KMmd_GMTEDmd)
+
+# Data cleansing
+negative_controls$slope$ID <- NULL
+negative_controls$slope <- negative_controls$slope$slope_1KMmd_GMTEDmd
+
+table(is.na(negative_controls$slope)) # no missing value
+```
+
+Note: no missing value found.
+
+##### Step 5 - Loading aspect Northness
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+aspect_N <- rast("Aspect/northness_1KMmd_GMTEDmd.tif")
+negative_controls$aspect_N <- terra::extract(aspect_N, vector)
+hist(negative_controls$aspect_N$northness_1KMmd_GMTEDmd)
+
+# Data cleansing
+negative_controls$aspect_N$ID <- NULL
+negative_controls$aspect_N <- negative_controls$aspect_N$northness_1KMmd_GMTEDmd
+
+table(is.na(negative_controls$aspect_N)) # no missing value
+```
+
+Note: no missing value found.
+
+##### Step 6 - Loading aspect Eastness
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+aspect_E <- rast("Aspect/eastness_1KMmd_GMTEDmd.tif")
+negative_controls$aspect_E <- terra::extract(aspect_E, vector)
+hist(negative_controls$aspect_E$eastness_1KMmd_GMTEDmd)
+
+# Data cleansing
+negative_controls$aspect_E$ID <- NULL
+negative_controls$aspect_E <- negative_controls$aspect_E$eastness_1KMmd_GMTEDmd
+
+table(is.na(negative_controls$aspect_E)) # no missing value
+```
+
+Note: no missing value found.
+
+##### Step 7 - Loading cropland
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+cropland <- rast("Cropland_Pasture/CroplandPastureArea2000_Geotiff/Cropland2000_5m.tif")
+negative_controls$cropland <- terra::extract(cropland, vector)
+hist(negative_controls$cropland$Cropland2000_5m)
+
+# Data cleansing
+negative_controls$cropland$ID <- NULL
+negative_controls$cropland <- negative_controls$cropland$Cropland2000_5m
+
+table(is.na(negative_controls$cropland)) # 5 missing values!
+```
+
+Treating missing values
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Replacing NAs with cropland values based on the nearest (minimum) distance calculation
+
+library(raster)
+cropland <- raster("Cropland_Pasture/CroplandPastureArea2000_Geotiff/Cropland2000_5m.tif")
+
+vals = readAll(cropland)
+
+negative_controls[is.na(negative_controls$cropland), "cropland"] <-
+  apply(X = negative_controls[is.na(negative_controls$cropland), 2:1], MARGIN = 1,
+        FUN = function(x) vals@data@values[which.min(replace(distanceFromPoints(cropland, x), is.na(cropland), NA))])
+
+summary(negative_controls$cropland) # no missing values
+```
+
+##### Step 8 - Loading pasture
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+pasture <- rast("Cropland_Pasture/CroplandPastureArea2000_Geotiff/Pasture2000_5m.tif")
+negative_controls$pasture <- terra::extract(pasture, vector)
+hist(negative_controls$pasture$Pasture2000_5m)
+
+# Data cleansing
+negative_controls$pasture$ID <- NULL
+negative_controls$pasture <- negative_controls$pasture$Pasture2000_5m
+
+table(is.na(negative_controls$pasture)) # 5 missing values!
+```
+
+Treating missing values
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Replacing NAs with pasture values based on the nearest (minimum) distance calculation
+
+pasture <- raster("Cropland_Pasture/CroplandPastureArea2000_Geotiff/Pasture2000_5m.tif")
+vals2 <- readAll(pasture)
+
+negative_controls[is.na(negative_controls$pasture), "pasture"] <-
+  apply(X = negative_controls[is.na(negative_controls$pasture), 2:1], MARGIN = 1,
+        FUN = function(x) vals2@data@values[which.min(replace(distanceFromPoints(pasture, x), is.na(pasture), NA))])
+
+summary(negative_controls$pasture) # no missing values
+```
+
+##### Step 9 - Loading forest_cover
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading file
+forest_cover <- rast("forest_cover.tif")
+negative_controls$forest_cover <- terra::extract(forest_cover, vector)
+
+# Data cleansing
+negative_controls$forest_cover$ID <- NULL
+negative_controls$forest_cover <- negative_controls$forest_cover$N44E021_20_C
+
+summary(as.factor(negative_controls$forest_cover)) # 3 missing values!
+```
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+save(negative_controls, file = "negative_controls_172.RData")
+load("negative_controls_172.RData")
+```
+
+Treating missing values (computationally demanding part)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+forest_cover <- raster("forest_cover.tif")
+vals3 <- readAll(forest_cover)
+
+negative_controls[is.na(negative_controls$forest_cover), "forest_cover"] <-
+  apply(X = negative_controls[is.na(negative_controls$forest_cover), 2:1], MARGIN = 1,
+        FUN = function(x) vals3@data@values[which.min(replace(distanceFromPoints(forest_cover, x), is.na(forest_cover), NA))])
+summary(negative_controls$forest_cover) # no missing values
+```
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+save(negative_controls, file = "negative_controls_190.RData")
+load("negative_controls_190.RData")
+```
+
+##### Step 10 - Loading NDVI_T
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 1. Loading NDVI data in S4 object (list)
+NDVI_T <- list.files(path = "NDVI/Terra", pattern = ".tif", all.files = T, full.names = T)
+NDVI_T <- lapply(NDVI_T, rast)
+
+# 2. Extracting file names and matching them with auxiliary file (= MOD13A3-061-Statistics.csv) to get exact datum for each tif
+library(stringr)
+NDVI_T_filenames <- data.frame(filenames = sapply(NDVI_T, FUN = function(x) x@ptr[["names"]]))
+NDVI_T_filenames$filenames <- str_replace(NDVI_T_filenames$filenames, "MOD13A3.061", "MOD13A3_061")
+
+auxiliary_T <- read.csv("Supporting files/MOD13A3-061-Statistics.csv", header = T, sep = ",")
+NDVI_T_filenames$date <- auxiliary_T$Date[match(NDVI_T_filenames$filenames, auxiliary_T$File.Name)]
+# sum(is.na(NDVI_T_filenames$date))
+
+# 3. Matching tif files to negative controls (closest tif in time to the negative control date)
+
+# Converting date column in NDVI_T_filenames to date class
+library(lubridate)
+if (!is.Date(NDVI_T_filenames$date)) {
+    NDVI_T_filenames$date <- as.Date(NDVI_T_filenames$date, format = "%Y-%m-%d")
+}
+
+# Converting date column in negative controls (acq_date) to date class in a separate column (acq_date_df)
+negative_controls$acq_date_df <- negative_controls$acq_date
+negative_controls$acq_date_df <- str_replace_all(negative_controls$acq_date_df, "\\.", "-")
+
+if (!is.Date(negative_controls$acq_date_df)) {
+  negative_controls$acq_date_df <- as.Date(negative_controls$acq_date_df, format = "%Y-%m-%d")
+}
+
+# Matching NDVI files to negative controls
+negative_controls$closest_NDVI_Terra <- sapply(negative_controls$acq_date_df, function(acq_date_df){
+    closest_index = which.min(abs(as.numeric(NDVI_T_filenames$date - acq_date_df)))
+    return(NDVI_T_filenames$filenames[closest_index])
+  })
+
+# table(is.na(negative_controls$closest_NDVI_Terra))
+
+# Self-check:
+# acq_date_df = negative_controls$acq_date_df[2023]
+# which.min(abs(as.numeric(NDVI_T_filenames$date - acq_date_df)))
+# closest_index = which.min(abs(as.numeric(NDVI_T_filenames$date - acq_date_df)))
+# NDVI_T_filenames$filenames[closest_index]
+
+# 4. Extracting NDVI values from the respective tif to each control point
+
+negative_controls$NDVI_T <- NA
+
+for (i in 1:nrow(negative_controls)){
+  index <- match(negative_controls$closest_NDVI_Terra[i], NDVI_T_filenames$filenames)
+  NDVI <- terra::extract(NDVI_T[[index]], vect(negative_controls[i,], geom = c("longitude", "latitude")))[1,2]/10000
+  negative_controls$NDVI_T[i] <- NDVI
+}
+
+summary(negative_controls$NDVI_T)
+hist(negative_controls$NDVI_T)
+
+table(is.na(negative_controls$NDVI_T)) # no missing values
+```
+
+Note: no missing value found.
+
+##### Step 11 - Loading NDVI_A
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 1. Loading data in S4 object (list)
+NDVI_A <- list.files(path = "NDVI/Aqua", pattern = ".tif", all.files = T, full.names = T)
+NDVI_A <- lapply(NDVI_A, rast)
+
+# 2. Extracting file names and matching them with auxiliary file (= MYD13A3-061-Statistics.csv) to get exact datum for each tif
+NDVI_A_filenames <- data.frame(filenames = sapply(NDVI_A, FUN = function(x) x@ptr[["names"]]))
+NDVI_A_filenames$filenames <- str_replace(NDVI_A_filenames$filenames, "MYD13A3.061", "MYD13A3_061")
+
+auxiliary_A <- read.csv("Supporting files/MYD13A3-061-Statistics.csv", header = T, sep = ",")
+NDVI_A_filenames$date <- auxiliary_A$Date[match(NDVI_A_filenames$filenames, auxiliary_A$File.Name)]
+# sum(is.na(NDVI_A_filenames$date))
+
+# 3. Matching tif files to negative control points (closest tif in time to the control date)
+
+# Converting date column in NDVI_A_filenames to date class
+if (!is.Date(NDVI_A_filenames$date)) {
+    NDVI_A_filenames$date <- as.Date(NDVI_A_filenames$date, format = "%Y-%m-%d")
+}
+
+# Matching NDVI files to control points
+negative_controls$closest_NDVI_Aqua <- sapply(negative_controls$acq_date_df, function(acq_date_df){
+    closest_index = which.min(abs(as.numeric(NDVI_A_filenames$date - acq_date_df)))
+    return(NDVI_A_filenames$filenames[closest_index])
+  })
+
+# table(is.na(negative_controls$closest_NDVI_Aqua))
+
+# 4. Extracting NDVI values from the respective tif to each control point
+
+negative_controls$NDVI_A <- NA
+
+for (i in 1:nrow(negative_controls)){
+  index <- match(negative_controls$closest_NDVI_Aqua[i], NDVI_A_filenames$filenames)
+  NDVI <- terra::extract(NDVI_A[[index]], vect(negative_controls[i,], geom = c("longitude", "latitude")))[1,2]/10000
+  negative_controls$NDVI_A[i] <- NDVI
+}
+
+summary(negative_controls$NDVI_A)
+hist(negative_controls$NDVI_A)
+
+table(is.na(negative_controls$NDVI_A)) # no missing values
+```
+
+Note: no missing value found.
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+saveRDS(negative_controls, "negative_controls_305.RData")
+negative_controls <- readRDS("negative_controls_305.RData")
+```
+
+##### Step 12 - Loading road
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+road <- read_sf("road.shp")
+
+# Calculating distance from road infrastructure
+
+coordinates_non_fire_points <- negative_controls[, c(2,1)]
+coordinates_non_fire_points <- st_as_sf(x = coordinates_non_fire_points, coords = c("longitude", "latitude"), crs = 4326L)
+coordinates_non_fire_points <- st_transform(x = coordinates_non_fire_points, crs = 4326L)
+
+negative_controls$road <- st_distance(x = coordinates_non_fire_points, y = road)
+negative_controls$road <- apply(negative_controls$road, 1, FUN = min)
+# hist(negative_controls$road)
+
+summary(negative_controls$road) # in meters
+table(is.na(negative_controls$road)) # no missing value
+```
+
+Note: no missing value found.
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+saveRDS(negative_controls, "negative_controls_330.RData")
+negative_controls <- readRDS("negative_controls_330.RData")
+```
+
+##### Step 13 - Loading railway
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+railway <- read_sf("railway.shp")
+
+negative_controls$railway <- st_distance(x = coordinates_non_fire_points, y = railway)
+negative_controls$railway <- apply(negative_controls$railway, 1, FUN = min)
+
+# hist(negative_controls$railway)
+
+table(is.na(negative_controls$railway)) # no missing value
+```
+
+Note: no missing value found.
+
+##### Step 14 - Loading water
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+water <- read_sf("water.shp")
+
+negative_controls$water <- st_distance(x = coordinates_non_fire_points, y = water)
+negative_controls$water <- apply(negative_controls$water, 1, FUN = min)
+
+# hist(negative_controls$water)
+
+table(is.na(negative_controls$water)) # no missing value
+```
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+saveRDS(negative_controls, "negative_controls_365.RData")
+negative_controls <- readRDS("negative_controls_365.RData")
+```
+
+Note: no missing value found.
+
+##### Step 15 - Generating climate data for non-fire points: exporting results for ClimateEU
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+unique(negative_controls$fire_loc)
+
+non_fire_points_EUClimate <- negative_controls[, c(4, 2, 1, 8)] # extracting fire_loc, latitude, longitude and elevation
+non_fire_points_EUClimate$ID2 <- non_fire_points_EUClimate$fire_loc
+non_fire_points_EUClimate <- non_fire_points_EUClimate[, c("fire_loc", "ID2", "latitude", "longitude", "elevation")]
+colnames(non_fire_points_EUClimate) <- c("ID1", "ID2", "lat", "long", "el")
+
+# write.csv(non_fire_points_EUClimate, "non_fire_input.csv", row.names = F, sep = ",", quote = F)
+```
+
+##### Step 16 - Importing annual climatic data into R
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading the acquired files from ClimateEU
+
+Y2010 <- read.csv("Annual/output_negative controls_Year_2010Y.csv")
+Y2010 <- Y2010[, c(1,3,4,5,6,10,12)]
+Y2011 <- read.csv("Annual/output_negative controls_Year_2011Y.csv")
+Y2011 <- Y2011[, c(1,3,4,5,6,10,12)]
+Y2012 <- read.csv("Annual/output_negative controls_Year_2012Y.csv")
+Y2012 <- Y2012[, c(1,3,4,5,6,10,12)]
+Y2013 <- read.csv("Annual/output_negative controls_Year_2013Y.csv")
+Y2013 <- Y2013[, c(1,3,4,5,6,10,12)]
+Y2014 <- read.csv("Annual/output_negative controls_Year_2014Y.csv")
+Y2014 <- Y2014[, c(1,3,4,5,6,10,12)]
+Y2015 <- read.csv("Annual/output_negative controls_Year_2015Y.csv")
+Y2015 <- Y2015[, c(1,3,4,5,6,10,12)]
+Y2016 <- read.csv("Annual/output_negative controls_Year_2016Y.csv")
+Y2016 <- Y2016[, c(1,3,4,5,6,10,12)]
+Y2017 <- read.csv("Annual/output_negative controls_Year_2017Y.csv")
+Y2017 <- Y2017[, c(1,3,4,5,6,10,12)]
+Y2018 <- read.csv("Annual/output_negative controls_Year_2018Y.csv")
+Y2018 <- Y2018[, c(1,3,4,5,6,10,12)]
+Y2019 <- read.csv("Annual/output_negative controls_Year_2019Y.csv")
+Y2019 <- Y2019[, c(1,3,4,5,6,10,12)]
+Y2020 <- read.csv("Annual/output_negative controls_Year_2020Y.csv")
+Y2020 <- Y2020[, c(1,3,4,5,6,10,12)]
+
+Y2010$Y <- '2010'
+Y2011$Y <- '2011'
+Y2012$Y <- '2012'
+Y2013$Y <- '2013'
+Y2014$Y <- '2014'
+Y2015$Y <- '2015'
+Y2016$Y <- '2016'
+Y2017$Y <- '2017'
+Y2018$Y <- '2018'
+Y2019$Y <- '2019'
+Y2020$Y <- '2020'
+
+Y2010_2020 <- rbind(Y2010,
+                    Y2011,
+                    Y2012,
+                    Y2013,
+                    Y2014,
+                    Y2015,
+                    Y2016,
+                    Y2017,
+                    Y2018,
+                    Y2019,
+                    Y2020)
+```
+
+Matching the exact values to negative control points
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+negative_controls$concatenate <- paste0(round(negative_controls$latitude, 6), round(negative_controls$longitude, 6), negative_controls$elevation, negative_controls$acq_date_Y)
+Y2010_2020$concatenate <- paste0(Y2010_2020$Latitude, Y2010_2020$Longitude, Y2010_2020$Elevation, Y2010_2020$Y)
+
+negative_controls$MAT <- Y2010_2020$MAT[match(negative_controls$concatenate, Y2010_2020$concatenate)]
+negative_controls$MAP <- Y2010_2020$MAP[match(negative_controls$concatenate, Y2010_2020$concatenate)]
+negative_controls$AHM <- Y2010_2020$AHM[match(negative_controls$concatenate, Y2010_2020$concatenate)]
+
+table(is.na(negative_controls$MAT)) # no missing values
+table(is.na(negative_controls$MAP)) # no missing values
+table(is.na(negative_controls$PPT)) # no missing values
+```
+
+Note: no missing value found.
+
+##### Step 17 - Importing seasonal climatic data into R
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading the acquired files from ClimateEU
+
+S2010 <- read.csv("Seasonal/output_negative controls_Year_2010S.csv")
+S2010 <- S2010[, -2]
+S2011 <- read.csv("Seasonal/output_negative controls_Year_2011S.csv")
+S2011 <- S2011[, -2]
+S2012 <- read.csv("Seasonal/output_negative controls_Year_2012S.csv")
+S2012 <- S2012[, -2]
+S2013 <- read.csv("Seasonal/output_negative controls_Year_2013S.csv")
+S2013 <- S2013[, -2]
+S2014 <- read.csv("Seasonal/output_negative controls_Year_2014S.csv")
+S2014 <- S2014[, -2]
+S2015 <- read.csv("Seasonal/output_negative controls_Year_2015S.csv")
+S2015 <- S2015[, -2]
+S2016 <- read.csv("Seasonal/output_negative controls_Year_2016S.csv")
+S2016 <- S2016[, -2]
+S2017 <- read.csv("Seasonal/output_negative controls_Year_2017S.csv")
+S2017 <- S2017[, -2]
+S2018 <- read.csv("Seasonal/output_negative controls_Year_2018S.csv")
+S2018 <- S2018[, -2]
+S2019 <- read.csv("Seasonal/output_negative controls_Year_2019S.csv")
+S2019 <- S2019[, -2]
+S2020 <- read.csv("Seasonal/output_negative controls_Year_2020S.csv")
+S2020 <- S2020[, -2]
+
+S2010$Y <- '2010'
+S2011$Y <- '2011'
+S2012$Y <- '2012'
+S2013$Y <- '2013'
+S2014$Y <- '2014'
+S2015$Y <- '2015'
+S2016$Y <- '2016'
+S2017$Y <- '2017'
+S2018$Y <- '2018'
+S2019$Y <- '2019'
+S2020$Y <- '2020'
+
+S2010_2020 <- rbind(S2010,
+                    S2011,
+                    S2012,
+                    S2013,
+                    S2014,
+                    S2015,
+                    S2016,
+                    S2017,
+                    S2018,
+                    S2019,
+                    S2020)
+```
+
+Adding exact season to each control point based on ClimateEU
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#spring: III-V (03,04,05)
+#summer: VI-VIII (06,07,08)
+#autumn: IX-XI (09,10,11)
+#winter: XII-II (12,01,02)
+
+season <- cbind(c('01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'),
+                c('wt', 'wt', 'sp', 'sp', 'sp', 'sm', 'sm', 'sm', 'at', 'at', 'at', 'wt'))
+
+colnames(season) <- c("month", "season")
+
+season <- as.data.frame(season)
+
+negative_controls$season <- season$season[match(negative_controls$acq_date_M, season$month)]
+
+S2010_2020$concatenate <- paste0(S2010_2020$Latitude, S2010_2020$Longitude, S2010_2020$Elevation, S2010_2020$Y)
+
+negative_controls$Tmax <- NA
+negative_controls$Tmin <- NA
+negative_controls$Tave <- NA
+negative_controls$PPT <- NA
+
+for (i in 1:nrow(negative_controls)) {
+  index <- match(negative_controls$concatenate[i], S2010_2020$concatenate)
+  values = NULL
+  if(negative_controls$season[i] == "wt") values <- c(S2010_2020[index, c(5, 9, 13, 17)])
+  if(negative_controls$season[i] == "sp") values <- c(S2010_2020[index, c(6, 10, 14, 18)])
+  if(negative_controls$season[i] == "sm") values <- c(S2010_2020[index, c(7, 11, 15, 19)])
+  if(negative_controls$season[i] == "at") values <- c(S2010_2020[index, c(8, 12, 16, 20)])
+  negative_controls$Tmax[i] <- values[[1]]
+  negative_controls$Tmin[i] <- values[[2]]
+  negative_controls$Tave[i] <- values[[3]]
+  negative_controls$PPT[i] <- values[[4]]
+}
+
+table(is.na(negative_controls$Tmax)) # no missing values
+table(is.na(negative_controls$Tmin)) # no missing values
+table(is.na(negative_controls$Tave)) # no missing values
+table(is.na(negative_controls$PPT)) # no missing values
+```
+
+Note: no missing value found.
+
+##### Step 18 - Importing monthly climatic data into R
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+M2010 <- read.csv("Monthly/output_negative controls_Year_2010M.csv")
+M2010 <- M2010[, -2]
+M2011 <- read.csv("Monthly/output_negative controls_Year_2011M.csv")
+M2011 <- M2011[, -2]
+M2012 <- read.csv("Monthly/output_negative controls_Year_2012M.csv")
+M2012 <- M2012[, -2]
+M2013 <- read.csv("Monthly/output_negative controls_Year_2013M.csv")
+M2013 <- M2013[, -2]
+M2014 <- read.csv("Monthly/output_negative controls_Year_2014M.csv")
+M2014 <- M2014[, -2]
+M2015 <- read.csv("Monthly/output_negative controls_Year_2015M.csv")
+M2015 <- M2015[, -2]
+M2016 <- read.csv("Monthly/output_negative controls_Year_2016M.csv")
+M2016 <- M2016[, -2]
+M2017 <- read.csv("Monthly/output_negative controls_Year_2017M.csv")
+M2017 <- M2017[, -2]
+M2018 <- read.csv("Monthly/output_negative controls_Year_2018M.csv")
+M2018 <- M2018[, -2]
+M2019 <- read.csv("Monthly/output_negative controls_Year_2019M.csv")
+M2019 <- M2019[, -2]
+M2020 <- read.csv("Monthly/output_negative controls_Year_2020M.csv")
+M2020 <- M2020[, -2]
+
+M2010$Y <- '2010'
+M2011$Y <- '2011'
+M2012$Y <- '2012'
+M2013$Y <- '2013'
+M2014$Y <- '2014'
+M2015$Y <- '2015'
+M2016$Y <- '2016'
+M2017$Y <- '2017'
+M2018$Y <- '2018'
+M2019$Y <- '2019'
+M2020$Y <- '2020'
+
+M2010_2020 <- rbind(M2010,
+                    M2011,
+                    M2012,
+                    M2013,
+                    M2014,
+                    M2015,
+                    M2016,
+                    M2017,
+                    M2018,
+                    M2019,
+                    M2020)
+```
+
+For loop
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+M2010_2020$concatenate <- paste0(M2010_2020$Latitude, M2010_2020$Longitude, M2010_2020$Elevation, M2010_2020$Y)
+
+negative_controls$Tmax_month <- NA
+negative_controls$Tmin_month <- NA
+negative_controls$Tave_month <- NA
+negative_controls$PPT_month <- NA
+
+for (i in 1:nrow(negative_controls)) {
+  index <- match(negative_controls$concatenate[i], M2010_2020$concatenate)
+  values = NULL
+  if(negative_controls$acq_date_M[i] == "01") values <- c(M2010_2020[index, c(5,17,29,41)])
+  if(negative_controls$acq_date_M[i] == "02") values <- c(M2010_2020[index, c(6,18,30,42)])
+  if(negative_controls$acq_date_M[i] == "03") values <- c(M2010_2020[index, c(7,19,31,43)])
+  if(negative_controls$acq_date_M[i] == "04") values <- c(M2010_2020[index, c(8,20,32,44)])
+  if(negative_controls$acq_date_M[i] == "05") values <- c(M2010_2020[index, c(9,21,33,45)])
+  if(negative_controls$acq_date_M[i] == "06") values <- c(M2010_2020[index, c(10,22,34,46)])
+  if(negative_controls$acq_date_M[i] == "07") values <- c(M2010_2020[index, c(11,23,35,47)])
+  if(negative_controls$acq_date_M[i] == "08") values <- c(M2010_2020[index, c(12,24,36,48)])
+  if(negative_controls$acq_date_M[i] == "09") values <- c(M2010_2020[index, c(13,25,37,49)])
+  if(negative_controls$acq_date_M[i] == "10") values <- c(M2010_2020[index, c(14,26,38,50)])
+  if(negative_controls$acq_date_M[i] == "11") values <- c(M2010_2020[index, c(15,27,39,51)])
+  if(negative_controls$acq_date_M[i] == "12") values <- c(M2010_2020[index, c(16,28,40,52)])
+  negative_controls$Tmax_month[i] <- values[[2]]
+  negative_controls$Tmin_month[i] <- values[[3]]
+  negative_controls$Tave_month[i] <- values[[1]]
+  negative_controls$PPT_month[i] <- values[[4]]
+}
+
+table(is.na(negative_controls$Tmax_month)) # no missing values
+table(is.na(negative_controls$Tmin_month)) # no missing values
+table(is.na(negative_controls$Tave_month)) # no missing values
+table(is.na(negative_controls$PPT_month)) # no missing values
+```
+
+Note: no missing value found.
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+save(negative_controls, file = "negative_controls_652.RData")
+load("negative_controls_652.RData")
+```
+
+##### Step 19 - Loading settlement
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+load(file = "distances_sphere_neg_ctrl.RData")
+negative_controls$settlement <- distances
+
+table(is.na(negative_controls$settlement))
+```
+
+Note: no missing value found.
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+save(negative_controls, file = "negative_controls_670.RData")
+load("negative_controls_670.RData")
+```
+
+##### Step 20 - Loading population
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Population density 2020
+pop_density_TIF_2020 <- rast("Population/gpw-v4-population-density-rev11_2020_30_sec_tif/gpw_v4_population_density_rev11_2020_30_sec.tif")
+pop_density_2020 <- crop(x = pop_density_TIF_2020, y = roi)
+
+negative_controls$pop_dens_2020 <- terra::extract(pop_density_2020, vector)
+negative_controls$pop_dens_2020$ID <- NULL
+negative_controls$pop_dens_2020 <- negative_controls$pop_dens_2020$gpw_v4_population_density_rev11_2020_30_sec
+summary(negative_controls$pop_dens_2020)
+table(is.na(negative_controls$pop_dens_2020)) # 1 missing value!
+
+# Population density 2015
+pop_density_TIF_2015 <- rast("Population/gpw-v4-population-density-rev11_2015_30_sec_tif/gpw_v4_population_density_rev11_2015_30_sec.tif")
+pop_density_2015 <- crop(pop_density_TIF_2015, roi)
+
+negative_controls$pop_dens_2015 <- terra::extract(pop_density_2015, vector)
+negative_controls$pop_dens_2015$ID <- NULL
+negative_controls$pop_dens_2015 <- negative_controls$pop_dens_2015$gpw_v4_population_density_rev11_2015_30_sec
+summary(negative_controls$pop_dens_2015)
+table(is.na(negative_controls$pop_dens_2015)) # 1 missing value!
+
+# Population density 2010
+pop_density_TIF_2010 <- rast("Population/gpw-v4-population-density-rev11_2010_30_sec_tif/gpw_v4_population_density_rev11_2010_30_sec.tif")
+pop_density_2010 <- crop(pop_density_TIF_2010, roi)
+
+negative_controls$pop_dens_2010 <- terra::extract(pop_density_2010, vector)
+negative_controls$pop_dens_2010$ID <- NULL
+negative_controls$pop_dens_2010 <- negative_controls$pop_dens_2010$gpw_v4_population_density_rev11_2010_30_sec
+summary(negative_controls$pop_dens_2010)
+table(is.na(negative_controls$pop_dens_2010)) # 1 missing value!
+
+# Matching 2010/2015/2020 population density to non-fire points
+
+negative_controls$population <- NA
+negative_controls$acq_date_Y <- as.numeric(negative_controls$acq_date_Y)
+years <- c(2010, 2015, 2020)
+
+for (i in 1:nrow(negative_controls)) {
+  difs <- abs(negative_controls$acq_date_Y[i]-years)
+  index <- which.min(difs) + 36 # if it is 1, then, adding 36 to get pop_dens_2010 value
+  negative_controls$population[i] <- negative_controls[i, index]
+}
+
+table(is.na(negative_controls$population)) # 1 missing value!
+negative_controls$population <- as.numeric(negative_controls$population)
+summary(negative_controls$population)
+```
+
+Treating missing values
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+View(negative_controls[is.na(negative_controls$population),])
+
+# Finding the right raster file
+# difs = abs(negative_controls$acq_date_Y[2792]-years) # 2015 file needed
+# index = which.min(difs) + 36
+
+pop_density_2015 <- raster("Population/gpw-v4-population-density-rev11_2015_30_sec_tif/gpw_v4_population_density_rev11_2015_30_sec.tif")
+vals4 <- readAll(pop_density_2015)
+negative_controls[is.na(negative_controls$pop_dens_2015), "pop_dens_2015"] <-
+  apply(X = negative_controls[is.na(negative_controls$pop_dens_2015), 2:1], MARGIN = 1,
+        FUN = function(x) vals4@data@values[which.min(replace(distanceFromPoints(pop_density_2015, x), is.na(pop_density_2015), NA))])
+
+negative_controls$population[is.na(negative_controls$population)] <- negative_controls$pop_dens_2015[is.na(negative_controls$population)]
+table(is.na(negative_controls$population)) # no missing values
+```
+
+Note: no missing value found.
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+save(negative_controls, file = "negative_controls_748.RData")
+load("negative_controls_748.RData")
+```
+
+##### Step 21 - Loading unemployment
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Dealing with NUTS2 & NUTS3 classifications regarding negative control points
+# The original fire_loc column should be decomposed to NUTS 3 in order to be able to calculate unemployment rate for CZ and SK points
+unique(negative_controls$fire_loc) # 34 locations (NUTS3 + country)
+
+non_fire_points_to_narrow <- st_as_sf(negative_controls, coords = c("longitude", "latitude"), crs = st_crs(roi))
+inters <- st_intersects(non_fire_points_to_narrow$geometry, roi)
+inters_final <- sapply(inters, FUN = function(x) if (length(x) == 0) NA else paste(roi$NAME_1[x], collapse = " "))
+non_fire_points_to_narrow$fire_loc = inters_final
+
+unique(non_fire_points_to_narrow$fire_loc) # 42 locations: 7 L'viv Transcarpathia! (NUTS3) = to be replaced
+table(non_fire_points_to_narrow$fire_loc)
+negative_controls$fire_loc_original <- inters_final # NUTS3 (decomposed country)
+
+# Loading unemployment related data
+
+load("unemployment.RData")
+
+NUTS_corr <- cbind(c("Argeș", "Bacău", "Banskobystrický",
+                     "Bistrița-Năsăud", "Borski", "Borsod-Abaúj-Zemplén",
+                     "Braničevski", "Brașov", "Buzău",
+                     "Caraș-Severin", "Chernivtsi", "Covasna",
+                     "Dâmbovița", "Gorj", "Harghita",
+                     "Heves", "Hunedoara", "Ivano-Frankivs'k",
+                     "Ivano-Frankivs'k L'viv", "Košický", "L'viv",
+                     "Lesser Poland", "Maramureș", "Mehedinți",
+                     "Moravskoslezský", "Mureș", "Neamț",
+                     "Nógrád", "Prahova", "Prešov",
+                     "Sibiu", "Silesian", "Subcarpathian",
+                     "Subcarpathian L'viv", "Suceava", "Transcarpathia",
+                     "Trenciansky", "Vâlcea", "Vrancea",
+                     "Žilinský", "Zlínský"),
+                   c("Sud - Muntenia", "Nord-Est", "Stredné Slovensko",
+                     "Nord-Vest", "Region Juzne i Istocne Srbije", "Észak-Magyarország",
+                     "Region Juzne i Istocne Srbije", "Centru", "Sud-Est",
+                     "Vest", "Chernivtsi", "Centru",
+                     "Sud - Muntenia", "Sud-Vest Oltenia", "Centru",
+                     "Észak-Magyarország", "Vest", "Ivano-Frankivsk",
+                     "Lviv", "Východné Slovensko", "Lviv",
+                     "Malopolskie", "Nord-Vest", "Sud-Vest Oltenia",
+                     "Moravskoslezsko", "Centru", "Nord-Est",
+                     "Észak-Magyarország", "Sud - Muntenia", "Východné Slovensko",
+                     "Centru", "Slaskie", "Podkarpackie",
+                     "Lviv", "Nord-Est", "Zakarpattya",
+                     "Západné Slovensko", "Sud-Vest Oltenia", "Sud-Est",
+                     "Stredné Slovensko", "Strední Morava"))
+
+colnames(NUTS_corr) <- c("NUTS3", "NUTS2")
+NUTS_corr <- as.data.frame(NUTS_corr)
+# str(as.factor(NUTS_corr$NUTS2)) #OK - 21 unique NUTS2 region
+
+# str(unemployment$Region) # 25 unique NUTS2 region
+# summary(as.factor(unemployment$Region))
+unemployment$Region[unemployment$Region == "Lvivska"] <- "Lviv"
+unemployment$Region[unemployment$Region == "Zakarpatska"] <- "Zakarpattya"
+unemployment$Region[unemployment$Region == "Ivano-Frankivska"] <- "Ivano-Frankivsk"
+unemployment$Region[unemployment$Region == "Chernivetzka"] <- "Chernivtsi"
+
+# Matching NUTS2 classification
+negative_controls$NUTS2 <- NUTS_corr$NUTS2[match(negative_controls$fire_loc_original, NUTS_corr$NUTS3)]
+table(negative_controls$NUTS2)
+str(as.factor(negative_controls$NUTS2)) # OK - 21 NUTS2 level
+
+# 7 NA's categorized in Lviv
+table(negative_controls$fire_loc_original)
+
+negative_controls$unemployment <- unemployment$Unemployment[match(paste0(negative_controls$acq_date_Y, negative_controls$NUTS2),
+                                                            paste0(unemployment$Y, unemployment$Region))]
+
+table(is.na(negative_controls$unemployment)) # 7 missing (NA) values
+summary(as.numeric(negative_controls$unemployment)) # 88 ":" values
+```
+
+Treating missing values
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 7 NAs:
+negative_controls$NUTS2[is.na(negative_controls$NUTS2)] <- "Lviv"
+
+negative_controls$unemployment <- unemployment$Unemployment[match(paste0(negative_controls$acq_date_Y, negative_controls$NUTS2),
+                                                            paste0(unemployment$Y, unemployment$Region))]
+
+summary(as.numeric(negative_controls$unemployment)) # 88 records remained
+
+# 88 ":"
+
+# Substituting ":" with "NA"
+negative_controls$unemployment[negative_controls$unemployment == ":"] = NA
+
+# Viewing NA lines: we are dealing with Serbian values between 2010 and 2012
+View(negative_controls[is.na(negative_controls$unemployment),])
+
+# Replacing NAs with country level unemployment data (for aged 15 years and more) from https://data.stat.gov.rs/Home/Result/24000100?languageCode=en-US
+
+negative_controls[negative_controls$acq_date_Y == "2010" & is.na(negative_controls$unemployment), "unemployment"] <- 19.2
+negative_controls[negative_controls$acq_date_Y == "2011" & is.na(negative_controls$unemployment), "unemployment"] <- 23.0
+negative_controls[negative_controls$acq_date_Y == "2012" & is.na(negative_controls$unemployment), "unemployment"] <- 23.9
+
+# table(is.na(negative_controls$unemployment))
+
+negative_controls$unemployment <- as.numeric(negative_controls$unemployment)
+round(negative_controls$unemployment, 2)
+```
+
+Note: no missing value found.
+
+Saving data frame
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+save(negative_controls, file = "negative_controls_863.RData")
+load("negative_controls_863.RData")
+```
+
+##### Step 22 - Saving negative controls the same way (with the same columns) as fire_points
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# This is our final data frame with fire points
+fire_points <- readRDS("fire_points_reduced.rds")
+
+# Checking NAs again in negative controls
+table(is.na(negative_controls)) # 2 NA
+View(negative_controls[!complete.cases(negative_controls),]) # these are the 2 pop_dens values that are not replaced intentionally
+
+# Selecting the same columns
+negative_controls_reduced <- negative_controls[, c(2,1,3,42,4,5,34,32,33,35,30,28,29,31,24:26,17,19,14,8:11,22,20,21,36,12,13,40,43)]
+colnames(negative_controls_reduced) <- colnames(fire_points)
+negative_controls_reduced$fire_points <- as.factor(negative_controls_reduced$fire_points)
+save(negative_controls_reduced, file = "negative_controls_reduced.RData")
+
+# Merging the 2 data frames
+all_points <- rbind.data.frame(fire_points, negative_controls_reduced)
+table(is.na(all_points)) # no missing values
+summary(all_points)
+save(all_points, file = "all_points.RData")
+```

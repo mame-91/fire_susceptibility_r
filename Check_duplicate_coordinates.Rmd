@@ -1,0 +1,30 @@
+---
+title: "Check_DFs"
+author: "Melinda Manczinger"
+date: "`r Sys.Date()`"
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+output: pdf_document
+urlcolor: blue
+---
+
+##### 1. Checking duplicate fire coordinates
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+setwd("~/Downloads/Forest_project")
+
+check_fire_coordinates <- all_points[, c(1:2,6)]
+check_fire_coordinates$latitude <- formatC(check_fire_coordinates$latitude, format = "f", digits = 5)
+check_fire_coordinates$longitude <- formatC(check_fire_coordinates$longitude, format = "f", digits = 5)
+check_fire_coordinates$combined <- paste0(check_fire_coordinates$latitude, check_fire_coordinates$longitude)
+
+length(unique(check_fire_coordinates$combined)) # 10344 unique coordinates
+which(duplicated(check_fire_coordinates$combined)) # 2346 2382
+
+View(check_fire_coordinates[duplicated(check_fire_coordinates$combined),]) # 50.34270 19.29180 & 50.34300 19.29810
+
+View(check_fire_coordinates[check_fire_coordinates$latitude == "50.34270",])
+View(check_fire_coordinates[check_fire_coordinates$latitude == "50.34300",])
+
+View(all_points[all_points$latitude == "50.3427",]) # Silesian fire
+View(all_points[all_points$latitude == "50.343",]) # Silesian fire
+```

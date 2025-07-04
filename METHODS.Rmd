@@ -1,0 +1,1348 @@
+---
+title: "METHODS (MATERIALS)"
+author: "Melinda Manczinger"
+date: "`r Sys.Date()`"
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+output: pdf_document
+urlcolor: blue
+---
+
+## METHODS - MATERIALS SECTION
+
+##### Step 1 - Loading the dependent variable
+
+We downloaded the dependent variable from the [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) website. After acquiring the 77 csv files (7 country x 11 years), we loaded the data in R, merged them into a single data frame, and filtered them based on the ```confidence``` variable.
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+setwd("~/Desktop/Forest_project")
+modis <- list.files(path = "Dependent_variable", pattern = ".csv", all.files = T, full.names = T)
+modis <- lapply(modis, read.csv, header = T, sep = ",")
+modis <- do.call(rbind.data.frame, modis)
+
+fire_points <- modis[modis$confidence >= 80,] # filter as per confidence variable
+# table(fire_points$confidence)
+# 72328 data points at this stage
+```
+
+##### Step 2 - Filtering fire points within the study area
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(sf)
+# Loading the Carpathian shapefile
+roi <- read_sf("~/Desktop/Forest_project/Study area_shp/all_regions_merge.shp")
+
+# Fire points within the study area
+fire_points_to_narrow <- st_as_sf(fire_points, coords = c("longitude", "latitude"), crs = st_crs(roi)) # get the same geometry as roi
+inters <- st_intersects(fire_points_to_narrow$geometry, roi) # get the intersect of the two
+inters_final <- sapply(inters, FUN = function(x) if (length(x) == 0) NA else paste(roi$NAME_1[x], collapse = " ")) # check the length of each row and return NAME_1 of roi
+fire_points_to_narrow$fire_loc <- inters_final # paste the results
+
+# which(sapply(inters, length) > 2) # there is no data point categorized in more than 2 regions
+# which(sapply(inters, length) == 2) # 3 fire points are categorized in 2 regions
+# sum(sapply(inters, length) == 1) # 5170 fire points are categorized in 1 region
+# table(fire_points_to_narrow$fire_loc)
+
+fire_points$fire_loc <- fire_points_to_narrow$fire_loc # adding region names to the original data frame
+fire_points <- fire_points[!is.na(fire_points$fire_loc),]
+# 5173 data points at this stage
+```
+
+##### Step 3 - Reclassification of the 3 fire pixels into 1 region & Generation of non-fire control points
+
+Reclassification
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(geosphere)
+# Merging CZ and SK regions due to small sample size, we take this into account for the generation of control points
+# CZ - Czech Republic: Moravskoslezský; Zlínsky as 1 region
+# SK - Slovakia: Banskobystrický; Kosický; Presovský; Trenčiansky; Žilinský as 1 region
+
+fire_points$new_region <- fire_points$fire_loc
+fire_points$new_region[fire_points$new_region == "Moravskoslezský" | 
+                       fire_points$new_region == "Zlínský"] <- "Czech Republic"
+fire_points$new_region[fire_points$new_region == "Banskobystrický" | 
+                       fire_points$new_region == "Košický" |
+                       fire_points$new_region == "Prešov" |
+                       fire_points$new_region == "Trenciansky" |
+                       fire_points$new_region == "Žilinský"] <- "Slovakia"
+
+# Categorizing 3 fire points into 1 region (Lviv)
+fire_points$new_region[fire_points$new_region == "Ivano-Frankivs'k L'viv" |
+                       fire_points$new_region == "Subcarpathian L'viv"] <- "L'viv"
+table(fire_points$new_region)
+
+# small double check:
+roi$NAME_1[roi$NAME_0 == "Czech Republic"] <- "Czech Republic"
+roi$NAME_1[roi$NAME_0 == "Slovakia"] <- "Slovakia"
+
+regions <- unique(roi$NAME_1)
+
+setdiff(regions, fire_points$new_region) # no difference found
+setdiff(fire_points$new_region, regions) # no difference found
+```
+
+Negative controls
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Generating negative controls
+negative_controls <- list() # create empty list
+
+# The for loop generates negative control points for each region
+for (i in 1:length(regions)) {
+region <- regions[i]
+indices <- which(roi$NAME_1 == region)
+
+# The if statement collects all coordinates within the examined region
+if (length(indices) == 1) coord <- roi$geometry[[indices]][[1]][[1]] else {
+  temp <- lapply(indices, FUN = function(x) roi$geometry[[x]][[1]][[1]])
+  coord <- do.call(rbind.data.frame, temp)
+}
+# The next row determines the easternmost - westernmost, and the northernmost - southernmost points of the examined region
+coord <- c(min(coord[,1]), max(coord[,1]), min(coord[,2]), max(coord[,2]))
+
+# Filtering for fires in the examined region:
+fires <- fire_points[fire_points$new_region == region,]
+# double-check: table(fire_points$fire_loc)
+
+counter <- 0
+# Creating vectors with possible coordinates:
+x_sample <- seq(coord[1], coord[2], by = 0.00001)
+y_sample <- seq(coord[3], coord[4], by = 0.00001)
+coordinates <- list()
+
+# Making of random control points
+while (counter < nrow(fires)) {
+  print(counter)
+  x <- sample(x_sample, 1)
+  y <- sample(y_sample, 1)
+  xy <- st_as_sf(data.frame(x = x, y = y), coords = c("x", "y"), crs = st_crs(roi))
+  # Determining if the sample point is in the given region:
+  inters <- st_intersects(xy, roi[indices,])
+  # Determining the distance of the sample point from fires in the given region
+  distances <- distVincentySphere(c(x,y), fire_points[ ,2:1])
+  if(length(inters[[1]]) == 1 & min(distances) > 5000){
+    counter <- counter + 1
+    coordinates[[counter]] <- c(x, y)
+  }
+}
+
+coordinates <- do.call(rbind.data.frame, coordinates)
+coordinates$acq_date <- fires$acq_date[sample(1:nrow(fires), nrow(fires), replace = F)]
+colnames(coordinates)[1:2] <- c("longitude", "latitude")
+coordinates$fire_loc <- region
+negative_controls[[i]] <- coordinates
+#plot(coordinates)
+#plot(roi[1,])
+#plot(fire_points[fire_points$fire_loc == "Moravskoslezský", 2:1])
+}
+
+negative_controls <- do.call(rbind.data.frame, negative_controls)
+#plot(negative_controls[,1:2])
+
+# saveRDS(negative_controls, file = "negative_controls.rds")
+negative_controls <- readRDS("negative_controls.rds")
+
+# double check the date and position:
+table(substr(fire_points$acq_date, 1, 4))
+table(substr(negative_controls$acq_date, 1, 4))
+
+setdiff(negative_controls$fire_loc, fire_points$new_region)
+setdiff(fire_points$new_region, negative_controls$fire_loc)
+```
+
+##### Step 4 - Importing an explanatory variable: elevation [CGIAR-CSI v.4.1](https://srtm.csi.cgiar.org)
+
+This is an intermediary step for acquiring elevation variable/parameter for fire coordinates in order to get more precise climatic variables from ClimateEU software.
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(terra)
+elevation <- list.files(path = "Elevation/tif_files", pattern = ".tif", all.files = T, full.names = T)
+elevation <- lapply(elevation, rast)
+elevation <- do.call(merge, elevation)
+
+# writeRaster(elevation, filename = "elevation_merged.tif")
+elevation <- rast("elevation_merged.tif")
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Match fire points with elevation
+vector <- vect(fire_points, geom = c("longitude", "latitude"))
+fire_points$elevation <- extract(elevation, vector)
+# table(is.na(fire_points$elevation$srtm_40_02)) # no NA value found
+summary(fire_points$elevation$srtm_40_02)
+# hist(fire_points$elevation$srtm_40_02)
+```
+
+##### Step 5 - Exporting results for ClimateEU load
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+fire_points_EUClimate <- fire_points[, c(16, 1, 2, 18)] #extracting fire_loc, latitude, longitude and elevation
+fire_points_EUClimate$elevation <- fire_points_EUClimate$elevation$srtm_40_02
+fire_points_EUClimate$ID2 <- fire_points_EUClimate$fire_loc
+fire_points_EUClimate <- fire_points_EUClimate[, c("fire_loc", "ID2", "latitude", "longitude", "elevation")]
+colnames(fire_points_EUClimate) <- c("ID1", "ID2", "lat", "long", "el") #renaming data as per ClimateEU instructions
+
+# write.csv(fire_points_EUClimate, "fire_input.csv", row.names = F, sep = ",", quote = F)
+```
+
+##### Step 6 - Importing annual climatic data into R
+
+Loading annual variables
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading the extracted files & subsetting them to the pre-selected fields
+Y2010 <- read.csv("Annual_climate_variables/input_Year_2010Y.csv")
+Y2010 <- Y2010[, c(1,3,4,5,6,10,12)]
+Y2011 <- read.csv("Annual_climate_variables/input_Year_2011Y.csv")
+Y2011 <- Y2011[, c(1,3,4,5,6,10,12)]
+Y2012 <- read.csv("Annual_climate_variables/input_Year_2012Y.csv")
+Y2012 <- Y2012[, c(1,3,4,5,6,10,12)]
+Y2013 <- read.csv("Annual_climate_variables/input_Year_2013Y.csv")
+Y2013 <- Y2013[, c(1,3,4,5,6,10,12)]
+Y2014 <- read.csv("Annual_climate_variables/input_Year_2014Y.csv")
+Y2014 <- Y2014[, c(1,3,4,5,6,10,12)]
+Y2015 <- read.csv("Annual_climate_variables/input_Year_2015Y.csv")
+Y2015 <- Y2015[, c(1,3,4,5,6,10,12)]
+Y2016 <- read.csv("Annual_climate_variables/input_Year_2016Y.csv")
+Y2016 <- Y2016[, c(1,3,4,5,6,10,12)]
+Y2017 <- read.csv("Annual_climate_variables/input_Year_2017Y.csv")
+Y2017 <- Y2017[, c(1,3,4,5,6,10,12)]
+Y2018 <- read.csv("Annual_climate_variables/input_Year_2018Y.csv")
+Y2018 <- Y2018[, c(1,3,4,5,6,10,12)]
+Y2019 <- read.csv("Annual_climate_variables/input_Year_2019Y.csv")
+Y2019 <- Y2019[, c(1,3,4,5,6,10,12)]
+Y2020 <- read.csv("Annual_climate_variables/input_Year_2020Y.csv")
+Y2020 <- Y2020[, c(1,3,4,5,6,10,12)]
+
+Y2010$Y <- '2010'
+Y2011$Y <- '2011'
+Y2012$Y <- '2012'
+Y2013$Y <- '2013'
+Y2014$Y <- '2014'
+Y2015$Y <- '2015'
+Y2016$Y <- '2016'
+Y2017$Y <- '2017'
+Y2018$Y <- '2018'
+Y2019$Y <- '2019'
+Y2020$Y <- '2020'
+
+Y2010_2020 <- rbind(Y2010,
+                    Y2011,
+                    Y2012,
+                    Y2013,
+                    Y2014,
+                    Y2015,
+                    Y2016,
+                    Y2017,
+                    Y2018,
+                    Y2019,
+                    Y2020)
+```
+
+Concatenation
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Preparing the fire_points data frame for the concatenation
+fire_points$acq_date_Y <- substr(fire_points$acq_date, 1, 4)
+fire_points$acq_date_M <- substr(fire_points$acq_date, 6, 7)
+# table(fire_points$acq_date_Y) # double check
+
+# Concatenating lat-lon-elev-acq_date_Y values
+fire_points$concatenate <- paste0(fire_points$latitude, fire_points$longitude, fire_points$elevation$srtm_40_02, fire_points$acq_date_Y)
+Y2010_2020$concatenate <- paste0(Y2010_2020$Latitude, Y2010_2020$Longitude, Y2010_2020$Elevation, Y2010_2020$Y)
+
+# Matching Y2010_2020 values and paste climate values into fire_points data frame
+fire_points$MAT <- Y2010_2020$MAT[match(fire_points$concatenate, Y2010_2020$concatenate)]
+fire_points$MAP <- Y2010_2020$MAP[match(fire_points$concatenate, Y2010_2020$concatenate)]
+fire_points$AHM <- Y2010_2020$AHM[match(fire_points$concatenate, Y2010_2020$concatenate)]
+```
+
+Descriptive statistics
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(moments)
+table(is.na(fire_points$MAT)) # no NA value found
+summary(fire_points$MAT)
+skewness(fire_points$MAT) # left skewness
+sd(fire_points$MAT)
+
+table(is.na(fire_points$MAP)) # no NA value found
+summary(fire_points$MAP)
+skewness(fire_points$MAP) # right skewness
+sd(fire_points$MAP)
+
+table(is.na(fire_points$AHM)) # no NA value found
+summary(fire_points$AHM)
+skewness(fire_points$AHM) # right skewness
+sd(fire_points$AHM)
+```
+
+##### Step 7 - Importing seasonal climatic data into R
+
+Loading seasonal variables
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading the extracted files & subsetting them to the pre-selected fields
+S2010 <- read.csv("Seasonal_climate_variables/input_Year_2010S.csv")
+S2010 <- S2010[, -2]
+S2011 <- read.csv("Seasonal_climate_variables/input_Year_2011S.csv")
+S2011 <- S2011[, -2]
+S2012 <- read.csv("Seasonal_climate_variables/input_Year_2012S.csv")
+S2012 <- S2012[, -2]
+S2013 <- read.csv("Seasonal_climate_variables/input_Year_2013S.csv")
+S2013 <- S2013[, -2]
+S2014 <- read.csv("Seasonal_climate_variables/input_Year_2014S.csv")
+S2014 <- S2014[, -2]
+S2015 <- read.csv("Seasonal_climate_variables/input_Year_2015S.csv")
+S2015 <- S2015[, -2]
+S2016 <- read.csv("Seasonal_climate_variables/input_Year_2016S.csv")
+S2016 <- S2016[, -2]
+S2017 <- read.csv("Seasonal_climate_variables/input_Year_2017S.csv")
+S2017 <- S2017[, -2]
+S2018 <- read.csv("Seasonal_climate_variables/input_Year_2018S.csv")
+S2018 <- S2018[, -2]
+S2019 <- read.csv("Seasonal_climate_variables/input_Year_2019S.csv")
+S2019 <- S2019[, -2]
+S2020 <- read.csv("Seasonal_climate_variables/input_Year_2020S.csv")
+S2020 <- S2020[, -2]
+
+S2010$Y <- '2010'
+S2011$Y <- '2011'
+S2012$Y <- '2012'
+S2013$Y <- '2013'
+S2014$Y <- '2014'
+S2015$Y <- '2015'
+S2016$Y <- '2016'
+S2017$Y <- '2017'
+S2018$Y <- '2018'
+S2019$Y <- '2019'
+S2020$Y <- '2020'
+
+S2010_2020 <- rbind(S2010,
+                    S2011,
+                    S2012,
+                    S2013,
+                    S2014,
+                    S2015,
+                    S2016,
+                    S2017,
+                    S2018,
+                    S2019,
+                    S2020)
+```
+
+For loop
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Adding exact season to each fire point based on ClimateEU
+
+#spring: III-V (03,04,05)
+#summer: VI-VIII (06,07,08)
+#autumn: IX-XI (09,10,11)
+#winter: XII-II (12,01,02)
+
+season <- cbind(c('01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'),
+                c('wt', 'wt', 'sp', 'sp', 'sp', 'sm', 'sm', 'sm', 'at', 'at', 'at', 'wt'))
+
+colnames(season) <- c("month", "season")
+season <- as.data.frame(season)
+fire_points$season <- season$season[match(fire_points$acq_date_M, season$month)]
+
+S2010_2020$concatenate <- paste0(S2010_2020$Latitude, S2010_2020$Longitude, S2010_2020$Elevation, S2010_2020$Y)
+
+fire_points$Tmax <- NA
+fire_points$Tmin <- NA
+fire_points$Tave <- NA
+fire_points$PPT <- NA
+
+for (i in 1:nrow(fire_points)) {
+  index <- match(fire_points$concatenate[i], S2010_2020$concatenate)
+  values = NULL
+  if(fire_points$season[i] == "wt") values <- c(S2010_2020[index, c(5, 9, 13, 17)])
+  if(fire_points$season[i] == "sp") values <- c(S2010_2020[index, c(6, 10, 14, 18)])
+  if(fire_points$season[i] == "sm") values <- c(S2010_2020[index, c(7, 11, 15, 19)])
+  if(fire_points$season[i] == "at") values <- c(S2010_2020[index, c(8, 12, 16, 20)])
+  fire_points$Tmax[i] <- values[[1]]
+  fire_points$Tmin[i] <- values[[2]]
+  fire_points$Tave[i] <- values[[3]]
+  fire_points$PPT[i] <- values[[4]]
+}
+```
+
+Descriptive statistics
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+table(fire_points$season)
+
+# Tmax
+table(is.na(fire_points$Tmax)) #no N/A in the Tmax variable
+
+summary(fire_points$Tmax[fire_points$season == "wt"]) #Tmax in winter stat
+skewness(fire_points$Tmax[fire_points$season == "wt"]) #right skewness
+sd(fire_points$Tmax[fire_points$season == "wt"])
+
+summary(fire_points$Tmax[fire_points$season == "sp"]) #Tmax in spring stat
+skewness(fire_points$Tmax[fire_points$season == "sp"]) #left skewness
+sd(fire_points$Tmax[fire_points$season == "sp"])
+
+summary(fire_points$Tmax[fire_points$season == "sm"]) #Tmax in summer stat
+skewness(fire_points$Tmax[fire_points$season == "sm"]) #left skewness
+sd(fire_points$Tmax[fire_points$season == "sm"])
+
+summary(fire_points$Tmax[fire_points$season == "at"]) #Tmax in autumn stat
+skewness(fire_points$Tmax[fire_points$season == "at"]) #left skewness
+sd(fire_points$Tmax[fire_points$season == "at"])
+
+# Tmin
+table(is.na(fire_points$Tmin)) #no N/A in the Tmin variable
+
+summary(fire_points$Tmin[fire_points$season == "wt"]) #Tmin in winter stat
+skewness(fire_points$Tmin[fire_points$season == "wt"]) #left skewness
+sd(fire_points$Tmin[fire_points$season == "wt"])
+
+summary(fire_points$Tmin[fire_points$season == "sp"]) #Tmin in spring stat
+skewness(fire_points$Tmin[fire_points$season == "sp"]) #left skewness
+sd(fire_points$Tmin[fire_points$season == "sp"])
+
+summary(fire_points$Tmin[fire_points$season == "sm"]) #Tmin in summer stat
+skewness(fire_points$Tmin[fire_points$season == "sm"]) #left skewness
+sd(fire_points$Tmin[fire_points$season == "sm"])
+
+summary(fire_points$Tmin[fire_points$season == "at"]) #Tmin in autumn stat
+skewness(fire_points$Tmin[fire_points$season == "at"]) #left skewness
+sd(fire_points$Tmin[fire_points$season == "at"])
+
+# Tave
+table(is.na(fire_points$Tave)) #no N/A in the Tave variable
+
+summary(fire_points$Tave[fire_points$season == "wt"]) #Tave in winter stat
+skewness(fire_points$Tave[fire_points$season == "wt"]) #right skewness
+sd(fire_points$Tave[fire_points$season == "wt"])
+
+summary(fire_points$Tave[fire_points$season == "sp"]) #Tave in spring stat
+skewness(fire_points$Tave[fire_points$season == "sp"]) #left skewness
+sd(fire_points$Tave[fire_points$season == "sp"])
+
+summary(fire_points$Tave[fire_points$season == "sm"]) #Tave in summer stat
+skewness(fire_points$Tave[fire_points$season == "sm"]) #left skewness
+sd(fire_points$Tave[fire_points$season == "sm"])
+
+summary(fire_points$Tave[fire_points$season == "at"]) #Tave in autumn stat
+skewness(fire_points$Tave[fire_points$season == "at"]) #left skewness
+sd(fire_points$Tave[fire_points$season == "at"])
+
+# PPT
+table(is.na(fire_points$PPT)) #no N/A in the PPT variable
+
+summary(fire_points$PPT[fire_points$season == "wt"]) #PPT in winter stat
+skewness(fire_points$PPT[fire_points$season == "wt"]) #right skewness
+sd(fire_points$PPT[fire_points$season == "wt"])
+
+summary(fire_points$PPT[fire_points$season == "sp"]) #PPT in spring stat
+skewness(fire_points$PPT[fire_points$season == "sp"]) #right skewness
+sd(fire_points$PPT[fire_points$season == "sp"])
+
+summary(fire_points$PPT[fire_points$season == "sm"]) #PPT in summer stat
+skewness(fire_points$PPT[fire_points$season == "sm"]) #right skewness
+sd(fire_points$PPT[fire_points$season == "sm"])
+
+summary(fire_points$PPT[fire_points$season == "at"]) #PPT in autumn stat
+skewness(fire_points$PPT[fire_points$season == "at"]) #right skewness
+sd(fire_points$PPT[fire_points$season == "at"])
+```
+
+##### Step 8 - Importing monthly climatic data into R
+
+Loading monthly variables
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading the extracted files & subsetting them to the pre-selected fields
+M2010 <- read.csv("Monthly_climate_variables/input_Year_2010M.csv")
+M2010 <- M2010[, -2]
+M2011 <- read.csv("Monthly_climate_variables/input_Year_2011M.csv")
+M2011 <- M2011[, -2]
+M2012 <- read.csv("Monthly_climate_variables/input_Year_2012M.csv")
+M2012 <- M2012[, -2]
+M2013 <- read.csv("Monthly_climate_variables/input_Year_2013M.csv")
+M2013 <- M2013[, -2]
+M2014 <- read.csv("Monthly_climate_variables/input_Year_2014M.csv")
+M2014 <- M2014[, -2]
+M2015 <- read.csv("Monthly_climate_variables/input_Year_2015M.csv")
+M2015 <- M2015[, -2]
+M2016 <- read.csv("Monthly_climate_variables/input_Year_2016M.csv")
+M2016 <- M2016[, -2]
+M2017 <- read.csv("Monthly_climate_variables/input_Year_2017M.csv")
+M2017 <- M2017[, -2]
+M2018 <- read.csv("Monthly_climate_variables/input_Year_2018M.csv")
+M2018 <- M2018[, -2]
+M2019 <- read.csv("Monthly_climate_variables/input_Year_2019M.csv")
+M2019 <- M2019[, -2]
+M2020 <- read.csv("Monthly_climate_variables/input_Year_2020M.csv")
+M2020 <- M2020[, -2]
+
+M2010$Y <- '2010'
+M2011$Y <- '2011'
+M2012$Y <- '2012'
+M2013$Y <- '2013'
+M2014$Y <- '2014'
+M2015$Y <- '2015'
+M2016$Y <- '2016'
+M2017$Y <- '2017'
+M2018$Y <- '2018'
+M2019$Y <- '2019'
+M2020$Y <- '2020'
+
+M2010_2020 <- rbind(M2010,
+                    M2011,
+                    M2012,
+                    M2013,
+                    M2014,
+                    M2015,
+                    M2016,
+                    M2017,
+                    M2018,
+                    M2019,
+                    M2020)
+```
+
+For loop
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+M2010_2020$concatenate <- paste0(M2010_2020$Latitude, M2010_2020$Longitude, M2010_2020$Elevation, M2010_2020$Y)
+
+fire_points$Tmax_month <- NA
+fire_points$Tmin_month <- NA
+fire_points$Tave_month <- NA
+fire_points$PPT_month <- NA
+
+for (i in 1:nrow(fire_points)) {
+  index <- match(fire_points$concatenate[i], M2010_2020$concatenate)
+  values = NULL
+  if(fire_points$acq_date_M[i] == "01") values <- c(M2010_2020[index, c(5,17,29,41)])
+  if(fire_points$acq_date_M[i] == "02") values <- c(M2010_2020[index, c(6,18,30,42)])
+  if(fire_points$acq_date_M[i] == "03") values <- c(M2010_2020[index, c(7,19,31,43)])
+  if(fire_points$acq_date_M[i] == "04") values <- c(M2010_2020[index, c(8,20,32,44)])
+  if(fire_points$acq_date_M[i] == "05") values <- c(M2010_2020[index, c(9,21,33,45)])
+  if(fire_points$acq_date_M[i] == "06") values <- c(M2010_2020[index, c(10,22,34,46)])
+  if(fire_points$acq_date_M[i] == "07") values <- c(M2010_2020[index, c(11,23,35,47)])
+  if(fire_points$acq_date_M[i] == "08") values <- c(M2010_2020[index, c(12,24,36,48)])
+  if(fire_points$acq_date_M[i] == "09") values <- c(M2010_2020[index, c(13,25,37,49)])
+  if(fire_points$acq_date_M[i] == "10") values <- c(M2010_2020[index, c(14,26,38,50)])
+  if(fire_points$acq_date_M[i] == "11") values <- c(M2010_2020[index, c(15,27,39,51)])
+  if(fire_points$acq_date_M[i] == "12") values <- c(M2010_2020[index, c(16,28,40,52)])
+  fire_points$Tmax_month[i] <- values[[2]]
+  fire_points$Tmin_month[i] <- values[[3]]
+  fire_points$Tave_month[i] <- values[[1]]
+  fire_points$PPT_month[i] <- values[[4]]
+}
+```
+
+Descriptive statistics
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# table(fire_points$acq_date_M)
+
+# Tave_month
+table(is.na(fire_points$Tave_month)) #no N/A in the Tave_month variable
+summary(fire_points$Tave_month) #Tave_month - for all months
+#summary(fire_points$Tave_month[fire_points$acq_date_M == '12']) #Tave_month - for each month separately
+skewness(fire_points$Tave_month) #skewness for all months
+#skewness(fire_points$Tave_month[fire_points$acq_date_M == '12']) #skewness for each month separately
+sd(fire_points$Tave_month) #sd for all months
+#sd(fire_points$Tave_month[fire_points$acq_date_M == '12']) #sd for each month separately
+
+# Tmax_month
+table(is.na(fire_points$Tmax_month)) #no N/A in the Tmax_month variable
+summary(fire_points$Tmax_month) #Tmax_month - for all months
+#summary(fire_points$Tmax_month[fire_points$acq_date_M == '12']) #Tmax_month - for each month separately
+skewness(fire_points$Tmax_month) #skewness for all months
+#skewness(fire_points$Tmax_month[fire_points$acq_date_M == '12']) #skewness for each month separately
+sd(fire_points$Tmax_month) #sd for all months
+#sd(fire_points$Tmax_month[fire_points$acq_date_M == '12']) #sd for each month separately
+
+# Tmin_month
+table(is.na(fire_points$Tmin_month)) #no N/A in the Tmin_month variable
+summary(fire_points$Tmin_month) #Tmin_month - for all months
+#summary(fire_points$Tmin_month[fire_points$acq_date_M == '12']) #Tmin_month - for each month separately
+skewness(fire_points$Tmin_month) #skewness for all months
+#skewness(fire_points$Tmin_month[fire_points$acq_date_M == '12']) #skewness for each month separately
+sd(fire_points$Tmin_month) #sd for all months
+#sd(fire_points$Tmin_month[fire_points$acq_date_M == '12']) #sd for each month separately
+
+# PPT_month
+table(is.na(fire_points$PPT_month)) #no N/A in the PPT_month variable
+summary(fire_points$PPT_month) #PPT_month - for all months
+#summary(fire_points$PPT_month[fire_points$acq_date_M =='12']) #PPT_month - for each month separately
+skewness(fire_points$PPT_month) #skewness for all months
+#skewness(fire_points$PPT_month[fire_points$acq_date_M == '12']) #skewness for each month separately
+sd(fire_points$PPT_month) #sd for all months
+#sd(fire_points$PPT_month[fire_points$acq_date_M == '12']) #sd for each month separately
+```
+
+Saving the data frame into RData file
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# save(fire_points, file = "fire_points_with_climatic_data.RData")
+# load("fire_points_with_climatic_data.RData")
+# Note: RData file will load the original saved df with the exact same name no matter how you named the RData file
+```
+
+##### Step 9 - Importing cropland variable: [cropland](http://www.earthstat.org/cropland-pasture-area-2000/)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Cropland density
+cropland <- rast("Cropland_Pasture/CroplandPastureArea2000_Geotiff/Cropland2000_5m.tif")
+
+fire_points$cropland <- terra::extract(cropland, vector)
+summary(fire_points$cropland$Cropland2000_5m) # 32 NA values found
+
+# Replacing NAs with cropland values based on the nearest (minimum) distance calculation
+
+# plot(crop(x = cropland, y = roi))
+library(raster)
+cropland <- raster("Cropland_Pasture/CroplandPastureArea2000_Geotiff/Cropland2000_5m.tif")
+vals <- readAll(cropland) # raster dataload of "cropland" only gives logical values back, calculations are made outside of R environment
+
+fire_points[is.na(fire_points$cropland$Cropland2000_5m), "cropland"] <-
+  apply(X = fire_points[is.na(fire_points$cropland$Cropland2000_5m), 2:1], MARGIN = 1,
+  FUN = function(x) vals@data@values[which.min(replace(distanceFromPoints(cropland, x), is.na(cropland), NA))])
+
+summary(fire_points$cropland$Cropland2000_5m)
+```
+
+##### Step 10 - Importing pasture variable: [pasture](http://www.earthstat.org/cropland-pasture-area-2000/)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#Pasture density
+pasture <- rast("Cropland_Pasture/CroplandPastureArea2000_Geotiff/Pasture2000_5m.tif")
+
+fire_points$pasture <- terra::extract(pasture, vector)
+summary(fire_points$pasture$Pasture2000_5m) # 32 NA values found
+
+# Replacing NAs with pasture values based on the nearest (minimum) distance calculation
+
+pasture <- raster("Cropland_Pasture/CroplandPastureArea2000_Geotiff/Pasture2000_5m.tif")
+vals2 <- readAll(pasture)
+
+fire_points[is.na(fire_points$pasture$Pasture2000_5m), "pasture"] <-
+  apply(X = fire_points[is.na(fire_points$pasture$Pasture2000_5m), 2:1], MARGIN = 1,
+  FUN = function(x) vals2@data@values[which.min(replace(distanceFromPoints(pasture, x), is.na(pasture), NA))])
+
+summary(fire_points$pasture$Pasture2000_5m)
+```
+
+##### Step 11 - Importing road variable: [road](https://www.diva-gis.org)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Distance to road
+
+road_CZ <- read_sf("Road/CZE_rds/CZE_roads.shp")
+road_HU <- read_sf("Road/HUN_rds/HUN_roads.shp")
+road_PL <- read_sf("Road/POL_rds/POL_roads.shp")
+road_RO <- read_sf("Road/ROU_rds/ROM_roads.shp")
+road_SR <- read_sf("Road/SRB_rds/SRB_roads.shp")
+road_SK <- read_sf("Road/SVK_rds/SVK_roads.shp")
+road_UA <- read_sf("Road/UKR_rds/UKR_roads.shp")
+  
+road <- rbind.data.frame(road_CZ, road_HU, road_PL, road_RO, road_SK, road_SR, road_UA)
+
+# write_sf(road, dsn = "road.shp")
+road <- read_sf("road.shp")
+
+# Calculating distance from road infrastructure
+
+coordinates_fire_points <- fire_points[, c(2,1)]
+coordinates_fire_points <- st_as_sf(x = coordinates_fire_points, coords = c("longitude", "latitude"), crs = 4326L)
+coordinates_fire_points <- st_transform(x = coordinates_fire_points, crs = 4326L)
+
+fire_points$road <- st_distance(x = coordinates_fire_points, y = road)
+# hist(fire_points$road)
+fire_points$road <- apply(fire_points$road, 1, FUN = min)
+summary(fire_points$road) # in meters
+# (https://stackoverflow.com/questions/55666858/how-can-i-get-correct-distances-in-meters-from-st-distance-sp-package-in-r-u)
+
+# boxplot(fire_points$road)
+# fire_points[fire_points$road > 12000,]
+```
+
+##### Step 12 - Importing railway variable: [railway](https://www.diva-gis.org)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Distance to railway
+
+rw_CZ <- read_sf("Railway/CZE_rrd/CZE_rails.shp")
+rw_HU <- read_sf("Railway/HUN_rrd/HUN_rails.shp")
+rw_PL <- read_sf("Railway/POL_rrd/POL_rails.shp")
+rw_RO <- read_sf("Railway/ROU_rrd/ROM_rails.shp")
+rw_SR <- read_sf("Railway/SRB_rrd/SRB_rails.shp")
+rw_SK <- read_sf("Railway/SVK_rrd/SVK_rails.shp")
+rw_UA <- read_sf("Railway/UKR_rrd/UKR_rails.shp")
+  
+railway <- rbind.data.frame(rw_CZ, rw_HU, rw_PL, rw_RO, rw_SK, rw_SR, rw_UA)
+ 
+# write_sf(railway, dsn = "railway.shp")
+railway <- read_sf("railway.shp")
+
+# Calculating distance from railway infrastructure
+
+fire_points$railway <- st_distance(x = coordinates_fire_points, y = railway)
+fire_points$railway <- apply(fire_points$railway, 1, FUN = min)
+
+summary(fire_points$railway)
+# boxplot(fire_points$railway)
+# fire_points[fire_points$railway > 20000,]
+# table(fire_points$new_region[fire_points$railway > 20000])
+```
+
+##### Step 13 - Importing water variable: [water](https://www.diva-gis.org)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Distance to water
+w_CZ_area <- read_sf("Water/CZE_wat/CZE_water_areas_dcw.shp")
+w_CZ_line <- read_sf("Water/CZE_wat/CZE_water_lines_dcw.shp")
+w_HU_area <- read_sf("Water/HUN_wat/HUN_water_areas_dcw.shp")
+w_HU_line <- read_sf("Water/HUN_wat/HUN_water_lines_dcw.shp")
+w_PL_area <- read_sf("Water/POL_wat/POL_water_areas_dcw.shp")
+w_PL_line <- read_sf("Water/POL_wat/POL_water_lines_dcw.shp")
+w_RO_area <- read_sf("Water/ROU_wat/ROM_water_areas_dcw.shp")
+w_RO_line <- read_sf("Water/ROU_wat/ROM_water_lines_dcw.shp")
+w_SR_area <- read_sf("Water/SRB_wat/SRB_water_areas_dcw.shp")
+w_SR_line <- read_sf("Water/SRB_wat/SRB_water_lines_dcw.shp")
+w_SK_area <- read_sf("Water/SVK_wat/SVK_water_areas_dcw.shp")
+w_SK_line <- read_sf("Water/SVK_wat/SVK_water_lines_dcw.shp")
+w_UA_area <- read_sf("Water/UKR_wat/UKR_water_areas_dcw.shp")
+w_UA_line <- read_sf("Water/UKR_wat/UKR_water_lines_dcw.shp")
+  
+water_line <- rbind.data.frame(w_CZ_line, w_HU_line, w_PL_line, w_RO_line, w_SR_line, w_SK_line, w_UA_line)
+
+water_area <- rbind.data.frame(w_CZ_area, w_HU_area, w_PL_area, w_RO_area, w_SR_area, w_SK_area, w_UA_area)
+
+water_line <- water_line[, c(4,5,1,2,3,6)] # rearranging water_line columns to be the same as water_area
+colnames(water_line) <- colnames(water_area) # renaming water_line columns to be the same as water_area
+
+water <- rbind.data.frame(water_line, water_area)
+# write_sf(water, dsn = "water.shp")
+water <- read_sf("water.shp")
+
+# Calculating distance from water
+
+fire_points$water <- st_distance(x = coordinates_fire_points, y = water)
+# sf::sf_use_s2(T)
+water <- water[-c(11743, 12637, 13928, 14480, 14655),]
+# Due to duplicate vertex issues, we excluded the above 5 rows
+fire_points$water <- st_distance(x = coordinates_fire_points, y = water)
+water$geometry <- water$geometry %>%
+  s2::s2_rebuild() %>%
+  sf::st_as_sfc()
+fire_points$water <- apply(fire_points$water, 1, FUN = min)
+
+summary(fire_points$water)
+# boxplot(fire_points$water)
+# table(fire_points$new_region[fire_points$water > 10000])
+```
+
+##### Step 14 - Importing forest coverage variable: [forest_cover](https://www.eorc.jaxa.jp/ALOS/en/dataset/fnf_e.htm)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading the tif files
+
+N45E015_20_FNF_F02DAR <- list.files(path = "Forest_cover/N45E015_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+N45E020_20_FNF_F02DAR <- list.files(path = "Forest_cover/N45E020_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+N45E025_20_FNF_F02DAR <- list.files(path = "Forest_cover/N45E025_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+
+N50E015_20_FNF_F02DAR <- list.files(path = "Forest_cover/N50E015_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+N50E020_20_FNF_F02DAR <- list.files(path = "Forest_cover/N50E020_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+N50E025_20_FNF_F02DAR <- list.files(path = "Forest_cover/N50E025_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+
+N55E015_20_FNF_F02DAR <- list.files(path = "Forest_cover/N55E015_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+N55E020_20_FNF_F02DAR <- list.files(path = "Forest_cover/N55E020_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+N55E025_20_FNF_F02DAR <- list.files(path = "Forest_cover/N55E025_20_FNF_F02DAR", pattern = ".tif", all.files = T, full.names = T)
+
+N45E015_20_FNF_F02DAR <- lapply(N45E015_20_FNF_F02DAR, rast)
+N45E020_20_FNF_F02DAR <- lapply(N45E020_20_FNF_F02DAR, rast)
+N45E025_20_FNF_F02DAR <- lapply(N45E025_20_FNF_F02DAR, rast)
+
+N50E015_20_FNF_F02DAR <- lapply(N50E015_20_FNF_F02DAR, rast)
+N50E020_20_FNF_F02DAR <- lapply(N50E020_20_FNF_F02DAR, rast)
+N50E025_20_FNF_F02DAR <- lapply(N50E025_20_FNF_F02DAR, rast)
+
+N55E015_20_FNF_F02DAR <- lapply(N55E015_20_FNF_F02DAR, rast)
+N55E020_20_FNF_F02DAR <- lapply(N55E020_20_FNF_F02DAR, rast)
+N55E025_20_FNF_F02DAR <- lapply(N55E025_20_FNF_F02DAR, rast)
+
+forest_cover <- do.call(merge, c(N45E015_20_FNF_F02DAR, N45E020_20_FNF_F02DAR, N45E025_20_FNF_F02DAR, N50E015_20_FNF_F02DAR, N50E020_20_FNF_F02DAR, N50E025_20_FNF_F02DAR, N55E015_20_FNF_F02DAR, N55E020_20_FNF_F02DAR, N55E025_20_FNF_F02DAR))
+
+# writeRaster(forest_cover, file = "forest_cover.tif")
+forest_cover <- rast("forest_cover.tif")
+```
+
+Extracting forest coverage values 
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+fire_points$forest_cover <- terra::extract(forest_cover, vector)
+fire_points$forest_cover$N41E015_20_C <- as.factor(fire_points$forest_cover$N41E015_20_C)
+summary(fire_points$forest_cover$N41E015_20_C)
+
+#Factor w/ 4 levels "1","2","3","4":
+#Category for classification of FNF
+# 1 - Forest (>90% crown cover) --- # 316
+# 2 - Forest (10-90% crown cover) --- # 558
+# 3 - Non-forest --- # 4248
+# 4 - Water --- # 51
+# 0 - No data --- # 0
+```
+
+##### Step 15 - Importing settlement variable: [settlement](https://geoservice.dlr.de/web/maps/eoc:wsf)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading the tif files
+settlement <- list.files(path = "Settlement", pattern = ".tif", all.files = T, full.names = T)
+settlement <- lapply(settlement, rast)
+settlement <- do.call(merge, settlement)
+
+# writeRaster(settlement, filename = "settlement_merged.tif")
+settlement <- rast("settlement_merged.tif")
+```
+
+Extracting distance values from settlements
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Getting coordinates of all settlements in the Carpathians
+
+settlement <- rasterToPoints(settlement, fun = function(x) {x == 255})
+settlement <- settlement[ ,1:2] # 1 = x coordinate, 2 = y coordinate
+# saveRDS(settlement, file = "F:/settlement_coordinates_short.rds")
+
+settlement <- readRDS("/media/workstation/XXXX_Disk/temp/settlement_coordinates_short.rds")
+ 
+library(geosphere)
+library(parallel)
+library(Rfast)
+ 
+c1 <- makeCluster(64)
+clusterExport(c1, c("distVincentySphere", "Dist"))
+ 
+distances <- apply(fire_points, 1, FUN = function(s) {
+  lon = as.numeric(s[2])
+  lat = as.numeric(s[1])
+  settlement_sub = settlement[settlement[ ,1] < (lon + 0.1) & settlement[ ,1] > (lon - 0.1) & settlement[ ,2] < (lat + 0.1) & settlement[ ,2] > (lat - 0.1),]
+  
+  clusterExport(c1, c("lon", "lat"))
+  dist_ind = which.min(parApply(cl = c1, settlement_sub, MARGIN = 1, FUN = function(x) {
+    Dist(rbind(x[1:2], c(lon,lat)))[1,2]
+    }))
+  distVincentySphere(p1 = settlement_sub[dist_ind,], p2 = c(lon,lat))
+  })
+ 
+# save(distances, file = "/media/workstation/XXXX_Disk/distances_sphere.RData")
+
+load(file = "distances_sphere.RData")
+# View(distances)
+
+fire_points$settlement <- distances
+summary(fire_points$settlement)
+# hist(fire_points$settlement)
+```
+
+##### Step 16 - Importing slope variable: [slope](https://www.earthenv.org/topography)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 1 km resolution - from GMTED2010 database - with median aggregation
+slope_TIF <- rast("Slope/slope_1KMmd_GMTEDmd.tif")
+# max(slope_TIF)
+slope <- crop(slope_TIF, roi)
+max(slope)
+# max = 43.78
+# hist(slope)
+# summary(slope)
+
+# Matching slope values to fire pixels
+
+fire_points$slope <- terra::extract(slope, vector)
+summary(fire_points$slope$slope_1KMmd_GMTEDmd)
+hist(fire_points$slope$slope_1KMmd_GMTEDmd)
+```
+
+##### Step 17 - Importing aspect Eastness & Northness variable: [aspect](https://www.earthenv.org/topography)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 1 km resolution - Aspect Northness - from GMTED2010 database - with median aggregation
+aspect_N <- rast("Aspect/northness_1KMmd_GMTEDmd.tif")
+# 1 km resolution - Aspect Eastness - from GMTED2010 database - with median aggregation
+aspect_E <- rast("Aspect/eastness_1KMmd_GMTEDmd.tif")
+
+# Matching aspect values to fire pixels
+
+fire_points$aspect_N <- terra::extract(aspect_N, vector)
+summary(fire_points$aspect_N$northness_1KMmd_GMTEDmd)
+# hist(fire_points$aspect_N$northness_1KMmd_GMTEDmd)
+
+fire_points$aspect_E <- terra::extract(aspect_E, vector)
+summary(fire_points$aspect_E$eastness_1KMmd_GMTEDmd)
+# hist(fire_points$aspect_E$eastness_1KMmd_GMTEDmd)
+```
+
+##### Step 18 - Importing NDVI Terra variable: [NDVI_T](https://lpdaac.usgs.gov/products/mod13a3v061/)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# NDVI MODIS Terra (MOD13A3)
+
+# 1. Loading NDVI data in S4 object (list)
+NDVI_T <- list.files(path = "NDVI/Terra", pattern = ".tif", all.files = T, full.names = T)
+NDVI_T <- lapply(NDVI_T, rast)
+
+# 2. Extracting file names and matching them with auxiliary file (= MOD13A3-061-Statistics.csv) to get exact datum for each tif
+library(stringr)
+NDVI_T_filenames <- data.frame(filenames = sapply(NDVI_T, FUN = function(x) x@ptr[["names"]]))
+NDVI_T_filenames$filenames <- str_replace(NDVI_T_filenames$filenames, "MOD13A3.061", "MOD13A3_061")
+
+auxiliary_T <- read.csv("Supporting files/MOD13A3-061-Statistics.csv", header = T, sep = ",")
+NDVI_T_filenames$date <- auxiliary_T$Date[match(NDVI_T_filenames$filenames, auxiliary_T$File.Name)]
+# sum(is.na(NDVI_T_filenames$date))
+
+# 3. Matching tif files to fire points (closest tif in time to the fire date)
+
+# Converting date column in NDVI_T_filenames to date class
+library(lubridate)
+if (!is.Date(NDVI_T_filenames$date)) {
+    NDVI_T_filenames$date <- as.Date(NDVI_T_filenames$date, format = "%Y-%m-%d")
+}
+
+# Converting date column in fire_points (acq_date) to date class in a separate column (acq_date_df)
+fire_points$acq_date_df <- fire_points$acq_date
+fire_points$acq_date_df <- str_replace_all(fire_points$acq_date_df, "\\.", "-")
+
+if (!is.Date(fire_points$acq_date_df)) {
+  fire_points$acq_date_df <- as.Date(fire_points$acq_date_df, format = "%Y-%m-%d")
+}
+
+# Matching NDVI files to fire points
+fire_points$closest_NDVI_Terra <- sapply(fire_points$acq_date_df, function(acq_date_df){
+    closest_index = which.min(abs(as.numeric(NDVI_T_filenames$date - acq_date_df)))
+    return(NDVI_T_filenames$filenames[closest_index])
+  })
+
+# table(is.na(fire_points$closest_NDVI_Terra))
+
+# Self-check:
+# acq_date_df = fire_points$acq_date_df[2023]
+# which.min(abs(as.numeric(NDVI_T_filenames$date - acq_date_df)))
+# closest_index = which.min(abs(as.numeric(NDVI_T_filenames$date - acq_date_df)))
+# NDVI_T_filenames$filenames[closest_index]
+
+# 4. Extracting NDVI values from the respective tif to each fire point
+
+fire_points$NDVI_T <- NA
+
+for (i in 1:nrow(fire_points)){
+  index <- match(fire_points$closest_NDVI_Terra[i], NDVI_T_filenames$filenames)
+  NDVI <- terra::extract(NDVI_T[[index]], vect(fire_points[i,], geom = c("longitude", "latitude")))[1,2]/10000
+  fire_points$NDVI_T[i] <- NDVI
+}
+
+summary(fire_points$NDVI_T)
+hist(fire_points$NDVI_T)
+```
+
+##### Step 19 - Importing NDVI Aqua variable: [NDVI_A](https://lpdaac.usgs.gov/products/myd13a3v061/)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#NDVI MODIS Aqua (MYD13A3)
+
+# 1. Loading data in S4 object (list)
+NDVI_A <- list.files(path = "NDVI/Aqua", pattern = ".tif", all.files = T, full.names = T)
+NDVI_A <- lapply(NDVI_A, rast)
+
+# 2. Extracting file names and matching them with auxiliary file (= MYD13A3-061-Statistics.csv) to get exact datum for each tif
+NDVI_A_filenames <- data.frame(filenames = sapply(NDVI_A, FUN = function(x) x@ptr[["names"]]))
+NDVI_A_filenames$filenames <- str_replace(NDVI_A_filenames$filenames, "MYD13A3.061", "MYD13A3_061")
+
+auxiliary_A <- read.csv("Supporting files/MYD13A3-061-Statistics.csv", header = T, sep = ",")
+NDVI_A_filenames$date <- auxiliary_A$Date[match(NDVI_A_filenames$filenames, auxiliary_A$File.Name)]
+# sum(is.na(NDVI_A_filenames$date))
+
+# 3. Matching tif files to fire points (closest tif in time to the fire date)
+
+# Converting date column in NDVI_A_filenames to date class
+if (!is.Date(NDVI_A_filenames$date)) {
+    NDVI_A_filenames$date <- as.Date(NDVI_A_filenames$date, format = "%Y-%m-%d")
+}
+
+# Matching NDVI files to fire points
+fire_points$closest_NDVI_Aqua <- sapply(fire_points$acq_date_df, function(acq_date_df){
+    closest_index = which.min(abs(as.numeric(NDVI_A_filenames$date - acq_date_df)))
+    return(NDVI_A_filenames$filenames[closest_index])
+  })
+
+# table(is.na(fire_points$closest_NDVI_Aqua))
+
+# 4. Extracting NDVI values from the respective tif to each fire point
+
+fire_points$NDVI_A <- NA
+
+for (i in 1:nrow(fire_points)){
+  index <- match(fire_points$closest_NDVI_Aqua[i], NDVI_A_filenames$filenames)
+  NDVI <- terra::extract(NDVI_A[[index]], vect(fire_points[i,], geom = c("longitude", "latitude")))[1,2]/10000
+  fire_points$NDVI_A[i] <- NDVI
+}
+
+summary(fire_points$NDVI_A)
+hist(fire_points$NDVI_A)
+```
+
+##### Step 20 - Importing population variable: [population](https://sedac.ciesin.columbia.edu/data/collection/gpw-v4/documentation)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Population density (note: only tif files left in the code)
+# Loading 2010-2015-2020 datasets, then, matching their values closest to each fire date
+
+# 2020 data:
+
+# Resolution: 1 km - TIF - 2020
+pop_density_TIF_2020 <- rast("Population/gpw-v4-population-density-rev11_2020_30_sec_tif/gpw_v4_population_density_rev11_2020_30_sec.tif")
+
+# Clip raster file to our study area
+pop_density_2020 <- crop(x = pop_density_TIF_2020, y = roi)
+plot(roi, add = T)
+max(pop_density_2020)
+# max = 27732.37 (~ population density of Monaco, highest population density in Europe)
+
+hist(pop_density_2020)
+# summary(pop_density_2020)
+# max(pop_density_TIF_2020) # max = 810693.6
+
+# Excluding values over 5.000 from visual representation in ArcMap (due to potential artifacts)
+
+# 2015 data:
+
+# Resolution: 1 km - TIF - 2015
+pop_density_TIF_2015 <- rast("Population/gpw-v4-population-density-rev11_2015_30_sec_tif/gpw_v4_population_density_rev11_2015_30_sec.tif")
+pop_density_2015 <- crop(pop_density_TIF_2015, roi)
+
+# 2010 data:
+
+# Resolution: 1 km - TIF - 2010
+pop_density_TIF_2010 <- rast("Population/gpw-v4-population-density-rev11_2010_30_sec_tif/gpw_v4_population_density_rev11_2010_30_sec.tif")
+pop_density_2010 <- crop(pop_density_TIF_2010, roi)
+
+# Extracting pop_dens values to fire points in separate columns
+
+# Popdens 2010
+fire_points$pop_dens_2010 <- terra::extract(pop_density_2010, vector)
+summary(fire_points$pop_dens_2010$gpw_v4_population_density_rev11_2010_30_sec)
+
+# Popdens 2015
+fire_points$pop_dens_2015 <- terra::extract(pop_density_2015, vector)
+summary(fire_points$pop_dens_2015$gpw_v4_population_density_rev11_2015_30_sec)
+
+# Popdens 2020
+fire_points$pop_dens_2020 <- terra::extract(pop_density_2020, vector)
+summary(fire_points$pop_dens_2020$gpw_v4_population_density_rev11_2020_30_sec)
+
+# Cleaning the data frame
+
+fire_points$pop_dens_2010$ID <- NULL
+fire_points$pop_dens_2015$ID <- NULL
+fire_points$pop_dens_2020$ID <- NULL
+fire_points$elevation$ID <- NULL
+fire_points$cropland$ID <- NULL
+fire_points$pasture$ID <- NULL
+fire_points$forest_cover$ID <- NULL
+fire_points$slope$ID <- NULL
+fire_points$aspect_N$ID <- NULL
+fire_points$aspect_E$ID <- NULL
+
+fire_points$pop_dens_2010 <- fire_points$pop_dens_2010$gpw_v4_population_density_rev11_2010_30_sec
+fire_points$pop_dens_2015 <- fire_points$pop_dens_2015$gpw_v4_population_density_rev11_2015_30_sec
+fire_points$pop_dens_2020 <- fire_points$pop_dens_2020$gpw_v4_population_density_rev11_2020_30_sec
+fire_points$elevation <- fire_points$elevation$srtm_40_02
+fire_points$cropland <- fire_points$cropland$Cropland2000_5m
+fire_points$pasture <- fire_points$pasture$Pasture2000_5m
+fire_points$forest_cover <- fire_points$forest_cover$N41E015_20_C
+fire_points$slope <- fire_points$slope$slope_1KMmd_GMTEDmd
+fire_points$aspect_N <- fire_points$aspect_N$northness_1KMmd_GMTEDmd
+fire_points$aspect_E <- fire_points$aspect_E$eastness_1KMmd_GMTEDmd
+
+# Matching 2010/2015/2020 population density to fire points
+
+fire_points$population <- NA
+fire_points$acq_date_Y <- as.numeric(fire_points$acq_date_Y)
+years <- c(2010, 2015, 2020)
+
+for (i in 1:nrow(fire_points)) {
+  difs <- abs(fire_points$acq_date_Y[i]-years)
+  index <- which.min(difs) + 48 # if it is 1, then, adding 48 to get pop_dens_2010 value
+  fire_points$population[i] <- fire_points[i, index]
+}
+
+table(is.na(fire_points$population)) # no missing values
+fire_points$population <- as.numeric(fire_points$population)
+summary(fire_points$population)
+```
+
+##### Step 21 - Importing unemployment variable: [unemployment](https://ec.europa.eu/eurostat/databrowser/view/tgs00010/default/table?lang=en, http://www.ukrstat.gov.ua/operativ/operativ2009/rp/rp_reg/reg_e/arh_rbn_e.htm)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Unemployment rate (NUTS2)
+library(readxl)
+
+# Unemployment rate: UA - loading the files separately
+
+unemployment_UA_2020 <- read_excel(path = "Unemployment/Ukraine/rbn_2020_ue.xls", skip = 3)
+unemployment_UA_2019 <- read_excel(path = "Unemployment/Ukraine/rbn_2019_e.xls", skip = 3)
+unemployment_UA_2018 <- read_excel(path = "Unemployment/Ukraine/rbn_2018_e.xls", skip = 3)
+unemployment_UA_2017 <- read_excel(path = "Unemployment/Ukraine/rbn_2017xls_e.xls", skip = 3)
+unemployment_UA_2016 <- read_excel(path = "Unemployment/Ukraine/rbn_2016xls_e.xls", skip = 3)
+unemployment_UA_2015 <- read_excel(path = "Unemployment/Ukraine/rbn_2015xls_e.xls", skip = 4)
+unemployment_UA_2014 <- read_excel(path = "Unemployment/Ukraine/rbn_2014xls_e.xls", skip = 4)
+unemployment_UA_2013 <- read_excel(path = "Unemployment/Ukraine/rbn_2013xls_e.xls", skip = 4)
+unemployment_UA_2012 <- read_excel(path = "Unemployment/Ukraine/rbn_2012xls_e.xls", skip = 4)
+unemployment_UA_2011 <- read_excel(path = "Unemployment/Ukraine/rbn_2011xls_e.xls", skip = 4)
+unemployment_UA_2010 <- read_excel(path = "Unemployment/Ukraine/rbn_2010xls_e.xls", skip = 4)
+
+# Filtering
+
+# 2020 - aged 15 years and over - Jan-Dec
+
+unemployment_UA_2020 <- unemployment_UA_2020[,c(11, 14)] # regions and working age unemp rate selected
+unemployment_UA_2020 <- unemployment_UA_2020[,c(2,1)]
+unemployment_UA_2020 <- unemployment_UA_2020[c(8,10,14,25),] # regions selected
+unemployment_UA_2020$Y <- 2020
+colnames(unemployment_UA_2020) <- c("Region", "Unemployment", "Y")
+
+# 2019 - aged 15 years and over - Jan-Dec
+
+unemployment_UA_2019 <- unemployment_UA_2019[,c(1,11)]
+unemployment_UA_2019 <- unemployment_UA_2019[c(8,10,14,25),]
+unemployment_UA_2019$Y <- 2019
+colnames(unemployment_UA_2019) <- c("Region", "Unemployment", "Y")
+
+# 2018 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2018 <- unemployment_UA_2018[,c(1,8)]
+unemployment_UA_2018 <- unemployment_UA_2018[c(8,10,14,25),]
+unemployment_UA_2018$Y <- 2018
+colnames(unemployment_UA_2018) <- c("Region", "Unemployment", "Y")
+
+# 2017 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2017 <- unemployment_UA_2017[,c(1,8)]
+unemployment_UA_2017 <- unemployment_UA_2017[c(8,10,14,25),]
+unemployment_UA_2017$Y <- 2017
+colnames(unemployment_UA_2017) <- c("Region", "Unemployment", "Y")
+
+# 2016 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2016 <- unemployment_UA_2016[,c(1,8)]
+unemployment_UA_2016 <- unemployment_UA_2016[c(8,10,14,25),]
+unemployment_UA_2016$Y <- 2016
+colnames(unemployment_UA_2016) <- c("Region", "Unemployment", "Y")
+
+# 2015 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2015 <- unemployment_UA_2015[,c(1,8)]
+unemployment_UA_2015 <- unemployment_UA_2015[c(9,11,15,26),]
+unemployment_UA_2015$Y <- 2015
+colnames(unemployment_UA_2015) <- c("Region", "Unemployment", "Y")
+
+# 2014 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2014 <- unemployment_UA_2014[,c(1,8)]
+unemployment_UA_2014 <- unemployment_UA_2014[c(9,11,15,26),]
+unemployment_UA_2014$Y <- 2014
+colnames(unemployment_UA_2014) <- c("Region", "Unemployment", "Y")
+
+# 2013 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2013 <- unemployment_UA_2013[,c(1,8)]
+unemployment_UA_2013 <- unemployment_UA_2013[c(9,11,15,26),]
+unemployment_UA_2013$Y <- 2013
+colnames(unemployment_UA_2013) <- c("Region", "Unemployment", "Y")
+
+# 2012 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2012 <- unemployment_UA_2012[,c(1,8)]
+unemployment_UA_2012 <- unemployment_UA_2012[c(9,11,15,26),]
+unemployment_UA_2012$Y <- 2012
+colnames(unemployment_UA_2012) <- c("Region", "Unemployment", "Y")
+
+# 2011 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2011 <- unemployment_UA_2011[,c(1,8)]
+unemployment_UA_2011 <- unemployment_UA_2011[c(9,11,15,26),]
+unemployment_UA_2011$Y <- 2011
+colnames(unemployment_UA_2011) <- c("Region", "Unemployment", "Y")
+
+# 2010 - aged 15-70 years - Jan-Dec
+
+unemployment_UA_2010 <- unemployment_UA_2010[,c(1,8)]
+unemployment_UA_2010 <- unemployment_UA_2010[c(9,11,15,26),]
+unemployment_UA_2010$Y <- 2010
+colnames(unemployment_UA_2010) <- c("Region", "Unemployment", "Y")
+
+unemp_corr_UA <- rbind.data.frame(unemployment_UA_2010,
+                                  unemployment_UA_2011,
+                                  unemployment_UA_2012,
+                                  unemployment_UA_2013,
+                                  unemployment_UA_2014,
+                                  unemployment_UA_2015,
+                                  unemployment_UA_2016,
+                                  unemployment_UA_2017,
+                                  unemployment_UA_2018,
+                                  unemployment_UA_2019,
+                                  unemployment_UA_2020)
+
+# summary(as.factor(unemp_corr_UA$Y))
+save(unemp_corr_UA, file = "unemp_corr_UA.RData")
+load("unemp_corr_UA.RData")
+
+# EUROSTAT countries - 15 years or over - annual
+
+unemployment_EU <- read_excel(path = "Unemployment/tgs00010_page_spreadsheet.xlsx", sheet = "Sheet 1", skip = 10)
+
+unemployment_EU <- unemployment_EU[, c(2,3,5,7,9,11,13,15,17,19,21,23)]
+unemployment_EU <- unemployment_EU[c(6,18,20,21,22,26,30,35,36,38,39,40,41,43,44,49,51),]
+
+# Saving the data similar to unemp_corr_UA
+
+unemployment_EU_new <- data.frame(rep(unemployment_EU$TIME...2, each = 11))
+unemployment_EU_new$Y <- rep(2010:2020, times = 17)
+colnames(unemployment_EU_new) <- c("Region", "Y")
+
+nevek <- unemployment_EU$TIME...2
+unemployment_EU <- unemployment_EU[,2:12]
+rownames(unemployment_EU) <- nevek
+
+unemployment_EU_new <- reshape2::melt(as.matrix(unemployment_EU))
+unemployment_EU_new <- unemployment_EU_new[,c(1,3,2)]
+colnames(unemployment_EU_new) <- c("Region", "Unemployment", "Y")
+
+# save(unemployment_EU_new, file = "unemployment_EU_new.RData")
+load("unemployment_EU_new.RData")
+
+unemployment <- rbind.data.frame(unemployment_EU_new, unemp_corr_UA)
+
+# save(unemployment, file = "unemployment.RData")
+load("unemployment.RData")
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Matching unemployment rates to fire coordinates
+summary(as.factor(fire_points$fire_loc))
+
+NUTS_corr <- cbind(c("Argeș", "Bacău", "Banskobystrický",
+                     "Bistrița-Năsăud", "Borski", "Borsod-Abaúj-Zemplén",
+                     "Braničevski", "Brașov", "Buzău",
+                     "Caraș-Severin", "Chernivtsi", "Covasna",
+                     "Dâmbovița", "Gorj", "Harghita",
+                     "Heves", "Hunedoara", "Ivano-Frankivs'k",
+                     "Ivano-Frankivs'k L'viv", "Košický", "L'viv",
+                     "Lesser Poland", "Maramureș", "Mehedinți",
+                     "Moravskoslezský", "Mureș", "Neamț",
+                     "Nógrád", "Prahova", "Prešov",
+                     "Sibiu", "Silesian", "Subcarpathian",
+                     "Subcarpathian L'viv", "Suceava", "Transcarpathia",
+                     "Trenciansky", "Vâlcea", "Vrancea",
+                     "Žilinský", "Zlínský"),
+                   c("Sud - Muntenia", "Nord-Est", "Stredné Slovensko",
+                     "Nord-Vest", "Region Juzne i Istocne Srbije", "Észak-Magyarország",
+                     "Region Juzne i Istocne Srbije", "Centru", "Sud-Est",
+                     "Vest", "Chernivtsi", "Centru",
+                     "Sud - Muntenia", "Sud-Vest Oltenia", "Centru",
+                     "Észak-Magyarország", "Vest", "Ivano-Frankivsk",
+                     "Lviv", "Východné Slovensko", "Lviv",
+                     "Malopolskie", "Nord-Vest", "Sud-Vest Oltenia",
+                     "Moravskoslezsko", "Centru", "Nord-Est",
+                     "Észak-Magyarország", "Sud - Muntenia", "Východné Slovensko",
+                     "Centru", "Slaskie", "Podkarpackie",
+                     "Lviv", "Nord-Est", "Zakarpattya",
+                     "Západné Slovensko", "Sud-Vest Oltenia", "Sud-Est",
+                     "Stredné Slovensko", "Strední Morava"))
+
+colnames(NUTS_corr) <- c("NUTS3", "NUTS2")
+NUTS_corr <- as.data.frame(NUTS_corr)
+
+unique(unemployment$Region) # 25 unique NUTS2 region
+unique(NUTS_corr$NUTS2) # OK - 21 unique NUTS2 region
+
+unique(NUTS_corr$NUTS3) # OK - 39 NUTS3 regions
+unique(fire_points$fire_loc) # OK - 39 NUTS3 regions
+
+unemployment$Region[unemployment$Region == "Lvivska"] <- "Lviv"
+unemployment$Region[unemployment$Region == "Zakarpatska"] <- "Zakarpattya"
+unemployment$Region[unemployment$Region == "Ivano-Frankivska"] <- "Ivano-Frankivsk"
+unemployment$Region[unemployment$Region == "Chernivetzka"] <- "Chernivtsi"
+
+# Creating a matrix of unemployment
+
+library(reshape2)
+unemployment_mtx <- acast(Region ~ Y, data = unemployment, value.var = "Unemployment")
+unemployment_mtx[unemployment_mtx == ":"] = NA
+class(unemployment_mtx) = "numeric"
+
+# Rounding the values to 2 decimals
+
+unemployment_mtx <- round(unemployment_mtx, 2)
+
+# Adding NUTS3 column to the matrix
+
+unemployment_mtx <- cbind(unemployment_mtx, NUTS3 = sapply(rownames(unemployment_mtx), FUN = function(x) {
+  paste(NUTS_corr$NUTS3[NUTS_corr$NUTS2 == x], collapse = ", ")
+}))
+
+# Saving the matrix
+# write.table(unemployment_mtx, file = "unemployment_mtx.tsv", sep = "\t", quote = F)
+
+fire_points$NUTS2 <- NUTS_corr$NUTS2[match(fire_points$fire_loc, NUTS_corr$NUTS3)]
+str(as.factor(fire_points$NUTS2)) # OK - 21 NUTS2 level
+
+fire_points$unemployment <- unemployment$Unemployment[match(paste0(fire_points$acq_date_Y, fire_points$NUTS2),
+                                                            paste0(unemployment$Y, unemployment$Region))]
+
+fire_points$unemployment[fire_points$unemployment == ":"] = NA
+table(is.na(fire_points$unemployment)) # 88 missing values
+```
+
+Treating missing values
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+View(fire_points[is.na(fire_points$unemployment),]) # 88 NAs in unemployment - Serbia (2010-2012)
+
+# Replacing NAs with country level unemployment data (for aged 15 years and more) from https://data.stat.gov.rs/Home/Result/24000100?languageCode=en-US
+
+
+fire_points[fire_points$acq_date_Y == "2010" & is.na(fire_points$unemployment), "unemployment"] <- 19.2
+fire_points[fire_points$acq_date_Y == "2011" & is.na(fire_points$unemployment), "unemployment"] <- 23.0
+fire_points[fire_points$acq_date_Y == "2012" & is.na(fire_points$unemployment), "unemployment"] <- 23.9
+
+# table(is.na(fire_points$unemployment))
+```
+
+##### Step 22 - Saving the whole data frame with an additional column stating 1 (existence of a fire event)
+
+Note: We will save the whole data frame with all columns, then, we save it with only coordinates and variables needed for the modelling part.
+
+Fire_points_all.rds:
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Fire points coded as 1
+fire_points$fire_points <- 1
+table(is.na(fire_points)) # no missing value
+
+# Rounding unemployment to 2 decimals
+fire_points$unemployment <- as.numeric(fire_points$unemployment)
+round(fire_points$unemployment, 2)
+
+saveRDS(fire_points, file = "fire_points_all.rds")
+```
+
+Fire_points_reduced:
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+fire_points_reduced <- fire_points[c("latitude", "longitude", "acq_date", "fire_loc", "new_region", "fire_points", "Tave_month", "Tmax_month", "Tmin_month", "PPT_month", "Tave", "Tmax", "Tmin", "PPT", "MAT", "MAP", "AHM", "NDVI_T", "NDVI_A", "forest_cover", "elevation", "slope", "aspect_N", "aspect_E", "water", "road", "railway", "settlement", "cropland", "pasture", "population", "unemployment")]
+
+# table(is.na(fire_points_reduced))
+
+# saveRDS(fire_points_reduced, file = "fire_points_reduced.rds")
+fire_points_reduced <- readRDS("fire_points_reduced.rds")
+```

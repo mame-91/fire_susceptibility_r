@@ -1,0 +1,1772 @@
+---
+title: "MODELS_H2O"
+author: "Melinda Manczinger"
+date: "`r Sys.Date()`"
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+output: pdf_document
+urlcolor: blue
+---
+
+## MODELS
+
+### STEP 1 - DATA LOAD
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+setwd("~/Desktop/Forest_project")
+
+# 1. Full dataset, n = 27
+scaled_test <- readRDS(file = "scaled_test.rds")
+scaled_training <- readRDS(file = "scaled_training.rds")
+
+# For the H2O y parameter, we will need a factor for classification
+scaled_test$fire_points <- as.factor(scaled_test$fire_points)
+scaled_training$fire_points <- as.factor(scaled_training$fire_points)
+
+# 2. Permissive VIF set, n = 23
+pVIF_set <- readRDS(file = "permissive_VIF_set.rds")
+
+# 3. Restrictive VIF set, n = 20
+rVIF_set <- readRDS(file = "restrictive_VIF_set.rds")
+
+# 4. “All in” rerank F, n = 10
+RFE_all_f <- readRDS(file = "rfe_all_f_model.rds")
+
+# 5. “All in” rerank T, n = 9
+RFE_all_t <- readRDS(file = "RFE_all_f_ds.rds")
+
+# 6. Permissive VIF set (n = 23) rerank F, n = 19
+RFE_pvif_f <- readRDS(file = "RFE_pvif_f.rds")
+
+# 7. Permissive VIF set (n = 23) rerank T, n = 21
+RFE_pvif_t <- readRDS(file = "RFE_pvif_t.rds")
+
+# 8. Restrictive VIF set (n = 20) rerank F, n = 17
+RFE_rvif_f <- readRDS(file = "RFE_rvif_f.rds")
+
+# 9. Restrictive VIF set(n = 20) rerank T, n = 1
+RFE_rvif_t <- readRDS(file = "RFE_rvif_t.rds")
+
+# 10. lamda.min, n = 25
+LASSO_min <- readRDS(file = "LASSO_min.rds")
+
+# 11. lamda.1se, n = 14
+LASSO_1se <- readRDS(file = "LASSO_1se.rds")
+```
+
+Creating ```features``` list to see each subset's column names:
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+features = list(full = colnames(scaled_training)[7:ncol(scaled_training)],
+                pVIF = colnames(pVIF_set)[7:ncol(pVIF_set)],
+                rVIF = colnames(rVIF_set)[7:ncol(rVIF_set)],
+                RFE_all_f = colnames(RFE_all_f)[7:ncol(RFE_all_f)],
+                RFE_all_t = colnames(RFE_all_t)[7:ncol(RFE_all_t)],
+                RFE_pvif_f = colnames(RFE_pvif_f)[7:ncol(RFE_pvif_f)],
+                RFE_pvif_t = colnames(RFE_pvif_t)[7:ncol(RFE_pvif_t)],
+                RFE_rvif_f = colnames(RFE_rvif_f)[7:ncol(RFE_rvif_f)],
+                RFE_rvif_t = colnames(RFE_rvif_t)[7:ncol(RFE_rvif_t)],
+                LASSO_min = colnames(LASSO_min)[7:ncol(LASSO_min)],
+                LASSO_1se = colnames(LASSO_1se)[7:ncol(LASSO_1se)])
+```
+
+---
+
+### STEP 2 - INITIALIZING H2O
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(h2o)
+
+h2o.init(
+  nthreads = -1, # -1: use all available threads
+  max_mem_size = "30G") # specify the memory size for the H2O cloud
+h2o.removeAll() # clean slate - just in case the cluster has already been running
+h2o.ls()
+gc()
+```
+
+---
+
+### STEP 3 - DISTRIBUTED RANDOM FOREST (DRF)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Hyperparameter and search criteria optimization
+# Adjusting mtries parameter for each subset: using the default round(sqrt(number of variables)) +/- 2 for tuning
+
+for (i in 1:length(features)) {
+  print(i)
+  mtry = round(sqrt(length(features[[i]])))
+  mtry_min = mtry - 2
+  if(mtry_min < 1) mtry_min = 1
+  mtry_max = mtry + 2
+  
+# Hyperparameters  
+  
+  hyper_params = list(
+    ntrees = c(5,50,100,200,500), # number of trees built
+    max_depth = c(3, 5, 10, 20, 30), # number of splits each tree is allowed to make
+    mtries = seq(mtry_min,mtry_max,1), # how many variables to randomly choose as candidates at each split
+    col_sample_rate_per_tree = c(0.5, 0.9, 1), # column sampling rate per tree
+    sample_rate = c(0.5, 0.632, 0.8, 0.95, 1) # how many training data is used for training each tree
+  )
+
+# Search criteria
+  
+  search_criteria <- list(
+    seed = 2024,
+    strategy = "RandomDiscrete", # random grid search of all combinations of hyperparameters
+    stopping_metric = "AUC", # AUC as stopping metric is used
+    stopping_tolerance = 1e-3, # requiring at least 0.001 (0.1%) improvement in AUC
+    stopping_rounds = 5, # used when AUC doesn't improve for 5 training rounds, based on a simple moving average
+    max_runtime_secs = 7200 # defining a 2-hour limit for each subset to run
+  )
+  
+  training_H2O <- as.h2o(scaled_training[,c(6, match(features[[i]], colnames(scaled_training)))])
+  test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+  
+  Y_H2O <- "fire_points"
+  X_H2O <- features[[i]]
+ 
+# Performing grid search
+  
+  grid <- h2o.grid(algorithm = "randomForest",
+                   hyper_params = hyper_params,
+                   x = X_H2O,
+                   y = Y_H2O,
+                   training_frame = training_H2O,
+                   grid_id = names(features)[i],
+                   nfolds = 10,
+                   seed = 1234,
+                   binomial_double_trees = F, # setting it to FALSE (= build one set of trees for each output class)
+                   search_criteria = search_criteria,
+                   score_tree_interval = 3 # 15 trees (3*5 rounds) have to be added (without improvement) for scoring before stopping
+                   )
+  
+  dir.create(names(features)[i])
+  h2o.saveGrid(grid_directory = names(features)[i], grid_id = names(features)[i])
+  h2o.removeAll()
+}
+```
+
+#### STEP 3.1. - Evaluation
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Evaluation: full, n = 27
+grid_full <- h2o.loadGrid(grid_path = "DRF_no_bdt/full/full")
+summary(grid_full)
+sortedgrid <- h2o.getGrid(grid_full@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # full_model_7 - AUC: 0.94288
+
+# Loading the best model: full_model_7
+full_model_7 <- h2o.loadModel(path = "DRF_no_bdt/full/full_model_7")
+
+# Predicting on test data
+i = 1
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n27 <- as.data.frame(h2o.predict(object = full_model_7, newdata = test_H2O))$p1
+auc <- roc(fire_points ~ fireprob_n27, data = scaled_test)
+auc$auc # AUC: 0.933
+
+#---
+
+# Evaluation: pVIF, n = 23
+grid_pVIF <- h2o.loadGrid(grid_path = "DRF_no_bdt/pVIF/pVIF")
+summary(grid_pVIF)
+sortedgrid <- h2o.getGrid(grid_pVIF@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # pVIF_model_7 - AUC: 0.94616
+
+# Loading the best model: pVIF_model_7
+pVIF_model_7 <- h2o.loadModel(path = "DRF_no_bdt/pVIF/pVIF_model_7")
+
+# Predicting on test data
+i = 2
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n23 <- as.data.frame(h2o.predict(object = pVIF_model_7, newdata = test_H2O))$p1
+auc2 <- roc(fire_points ~ fireprob_n23, data = scaled_test)
+auc2$auc # AUC: 0.9386
+
+#---
+
+# Evaluation: rVIF, n = 20
+grid_rVIF <- h2o.loadGrid(grid_path = "DRF_no_bdt/rVIF/rVIF")
+summary(grid_rVIF)
+sortedgrid <- h2o.getGrid(grid_rVIF@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # rVIF_model_7 - AUC: 0.94807
+
+# Loading the best model: rVIF_model_7
+rVIF_model_7 <- h2o.loadModel(path = "DRF_no_bdt/rVIF/rVIF_model_7")
+
+# Predicting on test data
+i = 3
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n20 <- as.data.frame(h2o.predict(object = rVIF_model_7, newdata = test_H2O))$p1
+auc3 <- roc(fire_points ~ fireprob_n20, data = scaled_test)
+auc3$auc # AUC: 0.9389
+
+#---
+
+# Evaluation: RFE_all_F, n = 10
+grid_rfe_all_f <- h2o.loadGrid(grid_path = "DRF_no_bdt/RFE_all_f/RFE_all_f")
+summary(grid_rfe_all_f)
+sortedgrid <- h2o.getGrid(grid_rfe_all_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_all_f_model_119 - AUC: 0.94206
+
+# Loading the best model: RFE_all_f_model_119
+RFE_all_f_model_119 <- h2o.loadModel(path = "DRF_no_bdt/RFE_all_f/RFE_all_f_model_119")
+
+# Predicting on test data
+i = 4
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n10 <- as.data.frame(h2o.predict(object = RFE_all_f_model_119, newdata = test_H2O))$p1
+auc4 <- roc(fire_points ~ fireprob_n10, data = scaled_test)
+auc4$auc # AUC: 0.9222
+
+#---
+
+# Evaluation: RFE_all_T, n = 9
+grid_rfe_all_t <- h2o.loadGrid(grid_path = "DRF_no_bdt/RFE_all_t/RFE_all_t")
+summary(grid_rfe_all_t)
+sortedgrid <- h2o.getGrid(grid_rfe_all_t@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_all_t_model_110 - AUC: 0.93957
+
+# Loading the best model: RFE_all_t_model_110
+RFE_all_t_model_110 <- h2o.loadModel(path = "DRF_no_bdt/RFE_all_t/RFE_all_t_model_110")
+
+# Predicting on test data
+i = 5
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n9 <- as.data.frame(h2o.predict(object = RFE_all_t_model_110, newdata = test_H2O))$p1
+auc5 <- roc(fire_points ~ fireprob_n9, data = scaled_test)
+auc5$auc # AUC: 0.9108
+
+#---
+
+# Evaluation: RFE_pVIF_F, n = 19
+grid_rfe_pvif_f <- h2o.loadGrid(grid_path = "DRF_no_bdt/RFE_pvif_f/RFE_pvif_f")
+summary(grid_rfe_pvif_f)
+sortedgrid <- h2o.getGrid(grid_rfe_pvif_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_pvif_f_model_7 - AUC: 0.94814
+
+# Loading the best model: RFE_pvif_f_model_7
+RFE_pvif_f_model_7 <- h2o.loadModel(path = "DRF_no_bdt/RFE_pvif_f/RFE_pvif_f_model_7")
+
+# Predicting on test data
+i = 6
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n19 <- as.data.frame(h2o.predict(object = RFE_pvif_f_model_7, newdata = test_H2O))$p1
+auc6 <- roc(fire_points ~ fireprob_n19, data = scaled_test)
+auc6$auc # AUC: 0.9391
+
+#---
+
+# Evaluation: RFE_pVIF_T, n = 21
+grid_rfe_pvif_t <- h2o.loadGrid(grid_path = "DRF_no_bdt/RFE_pvif_t/RFE_pvif_t")
+summary(grid_rfe_pvif_t)
+sortedgrid <- h2o.getGrid(grid_rfe_pvif_t@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_pvif_t_model_7 - AUC: 0.94713
+
+# Loading the best model: RFE_pvif_t_model_7
+RFE_pvif_t_model_7 <- h2o.loadModel(path = "DRF_no_bdt/RFE_pvif_t/RFE_pvif_t_model_7")
+
+# Predicting on test data
+i = 7
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n21 <- as.data.frame(h2o.predict(object = RFE_pvif_t_model_7, newdata = test_H2O))$p1
+auc7 <- roc(fire_points ~ fireprob_n21, data = scaled_test)
+auc7$auc # AUC: 0.9389
+
+#---
+
+# Evaluation: RFE_rVIF_F, n = 17
+grid_rfe_rvif_f <- h2o.loadGrid(grid_path = "DRF_no_bdt/RFE_rvif_f/RFE_rvif_f")
+summary(grid_rfe_rvif_f)
+sortedgrid <- h2o.getGrid(grid_rfe_rvif_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_rvif_f_model_7 - AUC: 0.95129
+
+# Loading the best model: RFE_rvif_f_model_7
+RFE_rvif_f_model_7 <- h2o.loadModel(path = "DRF_no_bdt/RFE_rvif_f/RFE_rvif_f_model_7")
+
+# Predicting on test data
+i = 8
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n17 <- as.data.frame(h2o.predict(object = RFE_rvif_f_model_7, newdata = test_H2O))$p1
+auc8 <- roc(fire_points ~ fireprob_n17, data = scaled_test)
+auc8$auc # AUC: 0.9404
+
+# Obtaining other classification metrics
+h2o.performance(model = RFE_rvif_f_model_7, newdata = test_H2O)
+
+#---
+
+# Evaluation: RFE_rVIF_T, n = 1
+grid_rfe_rvif_t <- h2o.loadGrid(grid_path = "DRF_no_bdt/RFE_rvif_t/RFE_rvif_t")
+sink(file = "drf_no_bdt_rfe_rvif_t.txt")
+summary(grid_rfe_rvif_t, show_stack_traces = TRUE)
+sink()
+# 483 failed models due to invalid mtries parameter
+
+sortedgrid <- h2o.getGrid(grid_rfe_rvif_t@grid_id, sort_by = "auc", decreasing = T)
+sink(file = "drf_no_bdt_rfe_rvif_t_auc.txt")
+summary(sortedgrid, show_stack_traces = TRUE)
+sink()
+# RFE_rvif_t_model_113 - AUC: 0.92188
+
+# Loading the best model: RFE_rvif_t_model_113
+RFE_rvif_t_model_113 <- h2o.loadModel(path = "DRF_no_bdt/RFE_rvif_t/RFE_rvif_t_model_113")
+
+# Predicting on test data
+i = 9
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n1 <- as.data.frame(h2o.predict(object = RFE_rvif_t_model_113, newdata = test_H2O))$p1
+auc9 <- roc(fire_points ~ fireprob_n1, data = scaled_test)
+auc9$auc # AUC: 0.6517
+
+#---
+
+# Evaluation: LASSO_min, n = 25
+grid_lasso_min <- h2o.loadGrid(grid_path = "DRF_no_bdt/LASSO_min/LASSO_min")
+summary(grid_lasso_min)
+sortedgrid <- h2o.getGrid(grid_lasso_min@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # LASSO_min_model_7 - AUC: 0.94318
+
+# Loading the best model: LASSO_min_model_7
+LASSO_min_model_7 <- h2o.loadModel(path = "DRF_no_bdt/LASSO_min/LASSO_min_model_7")
+
+# Predicting on test data
+i = 10
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n25 <- as.data.frame(h2o.predict(object = LASSO_min_model_7, newdata = test_H2O))$p1
+auc10 <- roc(fire_points ~ fireprob_n25, data = scaled_test)
+auc10$auc # AUC: 0.9346
+
+#---
+
+# Evaluation: LASSO_1se, n = 14
+grid_lasso_1se <- h2o.loadGrid(grid_path = "DRF_no_bdt/LASSO_1se/LASSO_1se")
+summary(grid_lasso_1se)
+sortedgrid <- h2o.getGrid(grid_lasso_1se@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # LASSO_1se_model_7 - AUC: 0.93613
+
+# Loading the best model: LASSO_1se_model_7
+LASSO_1se_model_7 <- h2o.loadModel(path = "DRF_no_bdt/LASSO_1se/LASSO_1se_model_7")
+
+# Predicting on test data
+i = 11
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n14 <- as.data.frame(h2o.predict(object = LASSO_1se_model_7, newdata = test_H2O))$p1
+auc11 <- roc(fire_points ~ fireprob_n14, data = scaled_test)
+auc11$auc # AUC: 0.923
+```
+
+---
+
+### STEP 4 - GRADIENT BOOSTING MACHINE (GBM)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Hyperparameter and search criteria optimization
+
+for (i in 1:length(features)) {
+
+# Hyperparameters
+  
+  hyper_params = list(
+    ntrees = c(5,50,100,200,500,1000,5000,10000), # number of trees built
+    max_depth = c(3, 5, 10, 20, 30), # number of splits each tree is allowed to make
+    col_sample_rate = c(seq(0.1,0.5,0.1), seq(0.55, 1, 0.05)), # how many variables to randomly choose as candidates at each split
+    col_sample_rate_per_tree = c(0.5, 0.9, 1), # column sampling rate per tree
+    sample_rate = c(0.5, 0.632, 0.8, 0.95, 1), # how many training data (row) is used for training each tree
+    col_sample_rate_change_per_level = c(0.9,1,1.1), # relative change of the column sampling rate for every level in each tree, a change as a function of the tree depth
+    min_rows = c(5,10,20), # minimum number of observations for a leaf in order to split
+    min_split_improvement = c(0,1e-8,1e-6,1e-4), # minimum relative improvement in order for a split to happen
+    histogram_type = c("AUTO","UniformAdaptive","Random","QuantilesGlobal","RoundRobin"), # all histogram types, QuantilesGlobal and RoundRobin are good for numeric columns with outliers
+    nbins = c(2,16,20,1024), # number of bins for split-finding for numeric columns
+    nbins_cats = c(2,16,1024) # number of bins for split-finding for categorical columns
+  )
+
+# Search criteria
+  
+  search_criteria <- list(
+    seed = 2024,
+    strategy = "RandomDiscrete", # random grid search of all combinations of hyperparameters
+    stopping_metric = "AUC", # AUC as stopping metric is used
+    stopping_tolerance = 1e-3, # requiring at least 0.001 improvement in AUC
+    stopping_rounds = 5, # used when AUC doesn't improve for 5 training rounds, based on a simple moving average
+    max_runtime_secs = 7200 # defining a 2-hour limit for each subset to run
+  )
+  
+  training_H2O <- as.h2o(scaled_training[,c(6, match(features[[i]], colnames(scaled_training)))])
+  test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+  
+  Y_H2O <- "fire_points"
+  X_H2O <- features[[i]]
+
+  # Performing grid search
+
+  grid <- h2o.grid(algorithm = "gbm",
+                   hyper_params = hyper_params,
+                   search_criteria = search_criteria,
+                   grid_id = names(features)[i],
+                   x = X_H2O,
+                   y = Y_H2O,
+                   training_frame = training_H2O,
+                   nfolds = 10,
+                   seed = 1234,
+                   learn_rate = 0.05, # smaller learning rate (requires higher ntrees)
+                   learn_rate_annealing = 0.99, # learning_rate shrinks by 1% after every tree
+                   score_tree_interval = 3 # 15 trees (3*5 rounds) have to be added (without improvement) for scoring before stopping
+                 )
+
+  dir.create(names(features)[i])
+  h2o.saveGrid(grid_directory = names(features)[i], grid_id = names(features)[i])
+  h2o.removeAll()
+}
+```
+
+#### STEP 4.1. - Evaluation
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Evaluation: full, n = 27
+grid_full <- h2o.loadGrid(grid_path = "GBM/full/full")
+summary(grid_full)
+sortedgrid <- h2o.getGrid(grid_full@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # full_model_33 - AUC: 0.94498
+
+# Loading the best model: full_model_33
+GBM_full_model_33 <- h2o.loadModel(path = "GBM/full/full_model_33")
+
+# Predicting on test data
+i = 1
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn27 <- as.data.frame(h2o.predict(object = GBM_full_model_33, newdata = test_H2O))$p1
+auc <- roc(fire_points ~ fireprob_gbmn27, data = scaled_test)
+auc$auc # AUC: 0.9355
+
+#---
+
+# Evaluation: pVIF, n = 23
+grid_pVIF <- h2o.loadGrid(grid_path = "GBM/pVIF/pVIF")
+summary(grid_pVIF)
+sortedgrid <- h2o.getGrid(grid_pVIF@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # pVIF_model_8 - AUC: 0.94573
+
+# Loading the best model: pVIF_model_8
+GBM_pVIF_model_8 <- h2o.loadModel(path = "GBM/pVIF/pVIF_model_8")
+
+# Predicting on test data
+i = 2
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn23 <- as.data.frame(h2o.predict(object = GBM_pVIF_model_8, newdata = test_H2O))$p1
+auc2 <- roc(fire_points ~ fireprob_gbmn23, data = scaled_test)
+auc2$auc # AUC: 0.9331
+
+#---
+
+# Evaluation: rVIF, n = 20
+grid_rVIF <- h2o.loadGrid(grid_path = "GBM/rVIF/rVIF")
+summary(grid_rVIF)
+sortedgrid <- h2o.getGrid(grid_rVIF@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # rVIF_model_8 - AUC: 0.94711
+
+# Loading the best model: rVIF_model_8
+GBM_rVIF_model_8 <- h2o.loadModel(path = "GBM/rVIF/rVIF_model_8")
+
+# Predicting on test data
+i = 3
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn20 <- as.data.frame(h2o.predict(object = GBM_rVIF_model_8, newdata = test_H2O))$p1
+auc3 <- roc(fire_points ~ fireprob_gbmn20, data = scaled_test)
+auc3$auc # AUC: 0.9298
+
+#---
+
+# Evaluation: RFE_all_F, n = 10
+grid_rfe_all_f <- h2o.loadGrid(grid_path = "GBM/RFE_all_f/RFE_all_f")
+summary(grid_rfe_all_f)
+sortedgrid <- h2o.getGrid(grid_rfe_all_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_all_f_model_33 - AUC: 0.94010
+
+# Loading the best model: RFE_all_f_model_33
+RFE_all_f_model_33 <- h2o.loadModel(path = "GBM/RFE_all_f/RFE_all_f_model_33")
+
+# Predicting on test data
+i = 4
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn10 <- as.data.frame(h2o.predict(object = RFE_all_f_model_33, newdata = test_H2O))$p1
+auc4 <- roc(fire_points ~ fireprob_gbmn10, data = scaled_test)
+auc4$auc # AUC: 0.9263
+
+#---
+
+# Evaluation: RFE_all_T, n = 9
+grid_rfe_all_t <- h2o.loadGrid(grid_path = "GBM/RFE_all_t/RFE_all_t")
+summary(grid_rfe_all_t)
+sortedgrid <- h2o.getGrid(grid_rfe_all_t@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_all_t_model_33 - AUC: 0.93383
+
+# Loading the best model: RFE_all_t_model_33
+RFE_all_t_model_33 <- h2o.loadModel(path = "GBM/RFE_all_t/RFE_all_t_model_33")
+
+# Predicting on test data
+i = 5
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn9 <- as.data.frame(h2o.predict(object = RFE_all_t_model_33, newdata = test_H2O))$p1
+auc5 <- roc(fire_points ~ fireprob_gbmn9, data = scaled_test)
+auc5$auc # AUC: 0.9175
+
+#---
+
+# Evaluation: RFE_pVIF_F, n = 19
+grid_rfe_pvif_f <- h2o.loadGrid(grid_path = "GBM/RFE_pvif_f/RFE_pvif_f")
+summary(grid_rfe_pvif_f)
+sortedgrid <- h2o.getGrid(grid_rfe_pvif_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_pvif_f_model_8 - AUC: 0.94761
+
+# Loading the best model: RFE_pvif_f_model_8
+RFE_pvif_f_model_8 <- h2o.loadModel(path = "GBM/RFE_pvif_f/RFE_pvif_f_model_8")
+
+# Predicting on test data
+i = 6
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn19 <- as.data.frame(h2o.predict(object = RFE_pvif_f_model_8, newdata = test_H2O))$p1
+auc6 <- roc(fire_points ~ fireprob_gbmn19, data = scaled_test)
+auc6$auc # AUC: 0.9362
+
+#---
+
+# Evaluation: RFE_pVIF_T, n = 21
+grid_rfe_pvif_t <- h2o.loadGrid(grid_path = "GBM/RFE_pvif_t/RFE_pvif_t")
+summary(grid_rfe_pvif_t)
+sortedgrid <- h2o.getGrid(grid_rfe_pvif_t@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_pvif_t_model_8 - AUC: 0.94675
+
+# Loading the best model: RFE_pvif_t_model_8
+RFE_pvif_t_model_8 <- h2o.loadModel(path = "GBM/RFE_pvif_t/RFE_pvif_t_model_8")
+
+# Predicting on test data
+i = 7
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn21 <- as.data.frame(h2o.predict(object = RFE_pvif_t_model_8, newdata = test_H2O))$p1
+auc7 <- roc(fire_points ~ fireprob_gbmn21, data = scaled_test)
+auc7$auc # AUC: 0.9354
+
+#---
+
+# Evaluation: RFE_rVIF_F, n = 17
+grid_rfe_rvif_f <- h2o.loadGrid(grid_path = "GBM/RFE_rvif_f/RFE_rvif_f")
+summary(grid_rfe_rvif_f)
+sortedgrid <- h2o.getGrid(grid_rfe_rvif_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_rvif_f_model_33 - AUC: 0.94803
+
+# Loading the best model: RFE_rvif_f_model_33
+RFE_rvif_f_model_33 <- h2o.loadModel(path = "GBM/RFE_rvif_f/RFE_rvif_f_model_33")
+
+# Predicting on test data
+i = 8
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmr17 <- as.data.frame(h2o.predict(object = RFE_rvif_f_model_33, newdata = test_H2O))$p1
+auc8 <- roc(fire_points ~ fireprob_gbmr17, data = scaled_test)
+auc8$auc # AUC: 0.9366
+
+# Obtaining other classification metrics
+h2o.performance(model = RFE_rvif_f_model_33, newdata = test_H2O)
+
+#---
+
+# Evaluation: RFE_rVIF_T, n = 1
+grid_rfe_rvif_t <- h2o.loadGrid(grid_path = "GBM/RFE_rvif_t/RFE_rvif_t")
+summary(grid_rfe_rvif_t)
+sortedgrid <- h2o.getGrid(grid_rfe_rvif_t@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_rvif_t_model_8 - AUC: 0.91313
+
+# Loading the best model: RFE_rvif_t_model_8
+RFE_rvif_t_model_8 <- h2o.loadModel(path = "GBM/RFE_rvif_t/RFE_rvif_t_model_8")
+
+# Predicting on test data
+i = 9
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn1 <- as.data.frame(h2o.predict(object = RFE_rvif_t_model_8, newdata = test_H2O))$p1
+auc9 <- roc(fire_points ~ fireprob_gbmn1, data = scaled_test)
+auc9$auc # AUC: 0.662
+
+#---
+
+# Evaluation: LASSO_min, n = 25
+grid_lasso_min <- h2o.loadGrid(grid_path = "GBM/LASSO_min/LASSO_min")
+summary(grid_lasso_min)
+sortedgrid <- h2o.getGrid(grid_lasso_min@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # LASSO_min_model_8 - AUC: 0.94465
+
+# Loading the best model: LASSO_min_model_8
+LASSO_min_model_8 <- h2o.loadModel(path = "GBM/LASSO_min/LASSO_min_model_8")
+
+# Predicting on test data
+i = 10
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn25 <- as.data.frame(h2o.predict(object = LASSO_min_model_8, newdata = test_H2O))$p1
+auc10 <- roc(fire_points ~ fireprob_gbmn25, data = scaled_test)
+auc10$auc # AUC: 0.926
+
+#---
+
+# Evaluation: LASSO_1se, n = 14
+grid_lasso_1se <- h2o.loadGrid(grid_path = "GBM/LASSO_1se/LASSO_1se")
+summary(grid_lasso_1se)
+sortedgrid <- h2o.getGrid(grid_lasso_1se@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # LASSO_1se_model_33 - AUC: 0.93844
+
+# Loading the best model: LASSO_1se_model_33
+LASSO_1se_model_33 <- h2o.loadModel(path = "GBM/LASSO_1se/LASSO_1se_model_33")
+
+# Predicting on test data
+i = 11
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_gbmn14 <- as.data.frame(h2o.predict(object = LASSO_1se_model_33, newdata = test_H2O))$p1
+auc11 <- roc(fire_points ~ fireprob_gbmn14, data = scaled_test)
+auc11$auc # AUC: 0.9258
+```
+
+---
+
+### STEP 5 - MULTIPLE LOGISTIC REGRESSION (MLR)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+family <- "binomial"
+link <- "logit"
+
+for (i in 1:length(features)) {
+  print(i)
+
+  training_H2O <- as.h2o(scaled_training[,c(6, match(features[[i]], colnames(scaled_training)))])
+  test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+  
+  Y_H2O <- "fire_points"
+  X_H2O <- features[[i]]
+  
+  model <- h2o.glm(x = X_H2O,
+                   y = Y_H2O,
+                   training_frame = training_H2O,
+                   model_id = names(features)[i],
+                   family = family,
+                   link = link,
+                   standardize = F, # already scaled
+                   nfolds = 10,
+                   alpha = 0,
+                   lambda = 0,
+                   remove_collinear_columns = F, # to preserve feature subsets
+                   keep_cross_validation_predictions = T,
+                   keep_cross_validation_models = T,
+                   keep_cross_validation_fold_assignment = T
+                   )
+
+  h2o.saveModel(object = model,
+                path = "MLR",
+                force = T,
+                export_cross_validation_predictions = T,
+                filename = paste0("MLR_",names(features)[i]))
+  h2o.removeAll()
+}
+```
+
+#### STEP 5.1. - Evaluation
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Evaluation: full, n = 27
+model_full <- h2o.loadModel(path = "MLR/MLR_full")
+summary(model_full) # AUC: 0.8597843
+
+# Predicting on test data
+i = 1
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n27 <- as.data.frame(h2o.predict(object = model_full, newdata = test_H2O))$p1
+auc <- roc(fire_points ~ fireprob_n27, data = scaled_test)
+auc$auc # AUC: 0.8565
+
+#---
+
+# Evaluation: pVIF, n = 23
+model_pVIF <- h2o.loadModel(path = "MLR/MLR_pVIF")
+summary(model_pVIF) # AUC: 0.8426762
+
+# Predicting on test data
+i = 2
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n23 <- as.data.frame(h2o.predict(object = model_pVIF, newdata = test_H2O))$p1
+auc2 <- roc(fire_points ~ fireprob_n23, data = scaled_test)
+auc2$auc # AUC: 0.8473
+
+#---
+
+# Evaluation: rVIF, n = 20
+model_rVIF <- h2o.loadModel(path = "MLR/MLR_rVIF")
+summary(model_rVIF) # AUC: 0.8407089
+
+# Predicting on test data
+i = 3
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n20 <- as.data.frame(h2o.predict(object = model_rVIF, newdata = test_H2O))$p1
+auc3 <- roc(fire_points ~ fireprob_n20, data = scaled_test)
+auc3$auc # AUC: 0.8442
+
+#---
+
+# Evaluation: RFE_all_F, n = 10
+model_rfe_all_f <- h2o.loadModel(path = "MLR/MLR_RFE_all_f")
+summary(model_rfe_all_f) # AUC: 0.8516188
+
+# Predicting on test data
+i = 4
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n10 <- as.data.frame(h2o.predict(object = model_rfe_all_f, newdata = test_H2O))$p1
+auc4 <- roc(fire_points ~ fireprob_n10, data = scaled_test)
+auc4$auc # AUC: 0.8498
+
+#---
+
+# Evaluation: RFE_all_T, n = 9
+model_rfe_all_t <- h2o.loadModel(path = "MLR/MLR_RFE_all_t")
+summary(model_rfe_all_t) # AUC: 0.8509149
+
+# Predicting on test data
+i = 5
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n9 <- as.data.frame(h2o.predict(object = model_rfe_all_t, newdata = test_H2O))$p1
+auc5 <- roc(fire_points ~ fireprob_n9, data = scaled_test)
+auc5$auc # AUC: 0.8495
+
+#---
+
+# Evaluation: RFE_pVIF_F, n = 19
+model_rfe_pvif_f <- h2o.loadModel(path = "MLR/MLR_RFE_pvif_f")
+summary(model_rfe_pvif_f) # AUC: 0.8374618
+
+# Predicting on test data
+i = 6
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n17 <- as.data.frame(h2o.predict(object = model_rfe_pvif_f, newdata = test_H2O))$p1
+auc6 <- roc(fire_points ~ fireprob_n17, data = scaled_test)
+auc6$auc # AUC: 0.8482
+
+#---
+
+# Evaluation: RFE_pVIF_T, n = 21
+model_rfe_pvif_t <- h2o.loadModel(path = "MLR/MLR_RFE_pvif_t")
+summary(model_rfe_pvif_t) # AUC: 0.8430865
+
+# Predicting on test data
+i = 7
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n18 <- as.data.frame(h2o.predict(object = model_rfe_pvif_t, newdata = test_H2O))$p1
+auc7 <- roc(fire_points ~ fireprob_n18, data = scaled_test)
+auc7$auc # AUC: 0.8471
+
+#---
+
+# Evaluation: RFE_rVIF_F, n = 17
+model_rfe_rvif_f <- h2o.loadModel(path = "MLR/MLR_RFE_rvif_f")
+summary(model_rfe_rvif_f) # AUC: 0.8413727
+
+# Predicting on test data
+i = 8
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_r18 <- as.data.frame(h2o.predict(object = model_rfe_rvif_f, newdata = test_H2O))$p1
+auc8 <- roc(fire_points ~ fireprob_r18, data = scaled_test)
+auc8$auc # AUC: 0.8442
+
+#---
+
+# Evaluation: RFE_rVIF_T, n = 1
+model_rfe_rvif_t <- h2o.loadModel(path = "MLR/MLR_RFE_rvif_t")
+summary(model_rfe_rvif_t) # AUC: 0.7733375
+
+# Predicting on test data
+i = 9
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n1 <- as.data.frame(h2o.predict(object = model_rfe_rvif_t, newdata = test_H2O))$p1
+auc9 <- roc(fire_points ~ fireprob_n1, data = scaled_test)
+auc9$auc # AUC: 0.7912
+
+#---
+
+# Evaluation: LASSO_min, n = 25
+model_lasso_min <- h2o.loadModel(path = "MLR/MLR_LASSO_min")
+summary(model_lasso_min) # AUC: 0.8598189
+
+# Predicting on test data
+i = 10
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n25 <- as.data.frame(h2o.predict(object = model_lasso_min, newdata = test_H2O))$p1
+auc10 <- roc(fire_points ~ fireprob_n25, data = scaled_test)
+auc10$auc # AUC: 0.8564
+
+#---
+
+# Evaluation: LASSO_1se, n = 14
+model_lasso_1se <- h2o.loadModel(path = "MLR/MLR_LASSO_1se")
+summary(model_lasso_1se) # AUC: 0.8601375
+
+# Predicting on test data
+i = 11
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_n14 <- as.data.frame(h2o.predict(object = model_lasso_1se, newdata = test_H2O))$p1
+auc11 <- roc(fire_points ~ fireprob_n14, data = scaled_test)
+auc11$auc # AUC: 0.8574
+
+# Obtaining other classification metrics
+h2o.performance(model = model_lasso_1se, newdata = test_H2O)
+```
+
+---
+
+### STEP 6 - EXTREME GRADIENT BOOSTING (XGBoost)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Hyperparameter and search criteria optimization
+
+for (i in 1:length(features)) {
+  print(i)
+
+# Hyperparameters
+  
+  hyper_params = list(
+    ntrees = c(5,50,100,200,500,1000,5000,10000), # default is 50
+    max_depth = c(3, 5, 10, 20, 30), # default is 6
+    col_sample_rate = c(seq(0.1,0.5,0.1), seq(0.55, 1, 0.05)), # default is 1
+    col_sample_rate_per_tree = c(0.5, 0.9, 1), # default is 1
+    sample_rate = c(0.5, 0.632, 0.8, 0.95, 1), # default is 1
+    min_rows = c(1,5,10,20), # default is 1
+    min_split_improvement = c(0,1e-8,1e-6,1e-4), # default is 0, optimal value between 1e-10 to 1e-3 range
+    reg_lambda = seq(0,20,1) # L2 regularization term on weights, default is 1
+    )
+
+# Search criteria
+  
+  search_criteria <- list(
+    seed = 1001,
+    strategy = "RandomDiscrete",
+    stopping_metric = "AUC",
+    stopping_tolerance = 1e-3, # requiring at least 0.001 improvement in AUC
+    stopping_rounds = 5, # used when AUC doesn't improve for 5 training rounds, based on a simple moving average
+    max_runtime_secs = 7200 # defining a 2-hour limit for each subset to run
+  )
+  
+  training_H2O <- as.h2o(scaled_training[,c(6, match(features[[i]], colnames(scaled_training)))])
+  test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+  
+  Y_H2O <- "fire_points"
+  X_H2O <- features[[i]]
+
+  # Performing grid search
+
+  grid <- h2o.grid(algorithm = "xgboost",
+                   x = X_H2O,
+                   y = Y_H2O,
+                   training_frame = training_H2O,
+                   seed = 1025,
+                   nfolds = 10,
+                   booster = "dart", # drop out of trees (selected uniformly)
+                   normalize_type = "tree", # new trees have the same weight as each of the dropped trees
+                   hyper_params = hyper_params,
+                   search_criteria = search_criteria,
+                   grid_id = names(features)[i],
+                   learn_rate = 0.05,
+                   score_tree_interval = 3
+                   )
+
+  dir.create(names(features)[i])
+  h2o.saveGrid(grid_directory = names(features)[i], grid_id = names(features)[i])
+  h2o.removeAll()
+}
+```
+
+#### STEP 6.1. - Evaluation
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Evaluation: full, n = 27
+grid_full <- h2o.loadGrid(grid_path = "xgb_new/full/full")
+summary(grid_full)
+sortedgrid <- h2o.getGrid(grid_full@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # full_model_3 - AUC: 0.94711
+
+# Loading the best model: full_model_3
+full_model_3 <- h2o.loadModel(path = "xgb_new/full/full_model_3")
+
+# Predicting on test data
+i = 1
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr27 <- as.data.frame(h2o.predict(object = full_model_3, newdata = test_H2O))$p1
+auc <- roc(fire_points ~ fireprob_xgbr27, data = scaled_test)
+auc$auc # AUC: 0.9381
+
+#---
+
+# Evaluation: pVIF, n = 23
+grid_pVIF <- h2o.loadGrid(grid_path = "xgb_new/pVIF/pVIF")
+summary(grid_pVIF)
+sortedgrid <- h2o.getGrid(grid_pVIF@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # pVIF_model_3 - AUC: 0.95026
+
+# Loading the best model: pVIF_model_3
+pVIF_model_3 <- h2o.loadModel(path = "xgb_new/pVIF/pVIF_model_3")
+
+# Predicting on test data
+i = 2
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr23 <- as.data.frame(h2o.predict(object = pVIF_model_3, newdata = test_H2O))$p1
+auc2 <- roc(fire_points ~ fireprob_xgbr23, data = scaled_test)
+auc2$auc # AUC: 0.9391
+
+#---
+
+# Evaluation: rVIF, n = 20
+grid_rVIF <- h2o.loadGrid(grid_path = "xgb_new/rVIF/rVIF")
+summary(grid_rVIF)
+sortedgrid <- h2o.getGrid(grid_rVIF@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # rVIF_model_4 - AUC: 0.94884
+
+# Loading the best model: rVIF_model_4
+rVIF_model_4 <- h2o.loadModel(path = "xgb_new/rVIF/rVIF_model_4")
+
+# Predicting on test data
+i = 3
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr20 <- as.data.frame(h2o.predict(object = rVIF_model_4, newdata = test_H2O))$p1
+auc3 <- roc(fire_points ~ fireprob_xgbr20, data = scaled_test)
+auc3$auc # AUC: 0.935
+
+#---
+
+# Evaluation: RFE_all_F, n = 10
+grid_rfe_all_f <- h2o.loadGrid(grid_path = "xgb_new/RFE_all_f/RFE_all_f")
+summary(grid_rfe_all_f)
+sortedgrid <- h2o.getGrid(grid_rfe_all_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_all_f_model_4 - AUC: 0.94370
+
+# Loading the best model: RFE_all_f_model_4
+RFE_all_f_model_4 <- h2o.loadModel(path = "xgb_new/RFE_all_f/RFE_all_f_model_4")
+
+# Predicting on test data
+i = 4
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr10 <- as.data.frame(h2o.predict(object = RFE_all_f_model_4, newdata = test_H2O))$p1
+auc4 <- roc(fire_points ~ fireprob_xgbr10, data = scaled_test)
+auc4$auc # AUC: 0.927
+
+#---
+
+# Evaluation: RFE_all_T, n = 9
+grid_rfe_all_t <- h2o.loadGrid(grid_path = "xgb_new/RFE_all_t/RFE_all_t")
+summary(grid_rfe_all_t)
+sortedgrid <- h2o.getGrid(grid_rfe_all_t@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_all_t_model_4 - AUC: 0.93470
+
+# Loading the best model: RFE_all_t_model_4
+RFE_all_t_model_4 <- h2o.loadModel(path = "xgb_new/RFE_all_t/RFE_all_t_model_4")
+
+# Predicting on test data
+i = 5
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr9 <- as.data.frame(h2o.predict(object = RFE_all_t_model_4, newdata = test_H2O))$p1
+auc5 <- roc(fire_points ~ fireprob_xgbr9, data = scaled_test)
+auc5$auc # AUC: 0.9171
+
+#---
+
+# Evaluation: RFE_pVIF_F, n = 19
+grid_rfe_pvif_f <- h2o.loadGrid(grid_path = "xgb_new/RFE_pvif_f/RFE_pvif_f")
+summary(grid_rfe_pvif_f)
+sortedgrid <- h2o.getGrid(grid_rfe_pvif_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_pvif_f_model_4 - AUC: 0.95203
+
+# Loading the best model: RFE_pvif_f_model_4
+RFE_pvif_f_model_4 <- h2o.loadModel(path = "xgb_new/RFE_pvif_f/RFE_pvif_f_model_4")
+
+# Predicting on test data
+i = 6
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr19 <- as.data.frame(h2o.predict(object = RFE_pvif_f_model_4, newdata = test_H2O))$p1
+auc6 <- roc(fire_points ~ fireprob_xgbr19, data = scaled_test)
+auc6$auc # AUC: 0.9414
+
+# Obtaining other classification metrics
+h2o.performance(model = RFE_pvif_f_model_4, newdata = test_H2O)
+
+#---
+
+# Evaluation: RFE_pVIF_T, n = 21
+grid_rfe_pvif_t <- h2o.loadGrid(grid_path = "xgb_new/RFE_pvif_t/RFE_pvif_t")
+summary(grid_rfe_pvif_t)
+sortedgrid <- h2o.getGrid(grid_rfe_pvif_t@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_pvif_t_model_4 - AUC: 0.95258
+
+# Loading the best model: RFE_pvif_t_model_4
+RFE_pvif_t_model_4 <- h2o.loadModel(path = "xgb_new/RFE_pvif_t/RFE_pvif_t_model_4")
+
+# Predicting on test data
+i = 7
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr21 <- as.data.frame(h2o.predict(object = RFE_pvif_t_model_4, newdata = test_H2O))$p1
+auc7 <- roc(fire_points ~ fireprob_xgbr21, data = scaled_test)
+auc7$auc # AUC: 0.9374
+
+#---
+
+# Evaluation: RFE_rVIF_F, n = 17
+grid_rfe_rvif_f <- h2o.loadGrid(grid_path = "xgb_new/RFE_rvif_f/RFE_rvif_f")
+summary(grid_rfe_rvif_f)
+sortedgrid <- h2o.getGrid(grid_rfe_rvif_f@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_rvif_f_model_4 - AUC: 0.95203
+
+# Loading the best model: RFE_rvif_f_model_4
+RFE_rvif_f_model_4 <- h2o.loadModel(path = "xgb_new/RFE_rvif_f/RFE_rvif_f_model_4")
+
+# Predicting on test data
+i = 8
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr17 <- as.data.frame(h2o.predict(object = RFE_rvif_f_model_4, newdata = test_H2O))$p1
+auc8 <- roc(fire_points ~ fireprob_xgbr17, data = scaled_test)
+auc8$auc # AUC: 0.9389
+
+#---
+
+# Evaluation: RFE_rVIF_T, n = 1
+grid_rfe_rvif_t <- h2o.loadGrid(grid_path = "xgb_new/RFE_rvif_t/RFE_rvif_t")
+summary(grid_rfe_rvif_t)
+sortedgrid <- h2o.getGrid(grid_rfe_rvif_t@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # RFE_rvif_t_model_4 - AUC: 0.91438
+
+# Loading the best model: RFE_rvif_t_model_4
+RFE_rvif_t_model_4 <- h2o.loadModel(path = "xgb_new/RFE_rvif_t/RFE_rvif_t_model_4")
+
+# Predicting on test data
+i = 9
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr1 <- as.data.frame(h2o.predict(object = RFE_rvif_t_model_4, newdata = test_H2O))$p1
+auc9 <- roc(fire_points ~ fireprob_xgbr1, data = scaled_test)
+auc9$auc # AUC: 0.6155
+
+#---
+
+# Evaluation: LASSO_min, n = 25
+grid_lasso_min <- h2o.loadGrid(grid_path = "xgb_new/LASSO_min/LASSO_min")
+summary(grid_lasso_min)
+sortedgrid <- h2o.getGrid(grid_lasso_min@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # LASSO_min_model_2 - AUC: 0.94115
+
+# Loading the best model: LASSO_min_model_2
+LASSO_min_model_2 <- h2o.loadModel(path = "xgb_new/LASSO_min/LASSO_min_model_2")
+
+# Predicting on test data
+i = 10
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr25 <- as.data.frame(h2o.predict(object = LASSO_min_model_2, newdata = test_H2O))$p1
+auc10 <- roc(fire_points ~ fireprob_xgbr25, data = scaled_test)
+auc10$auc # AUC: 0.932
+
+#---
+
+# Evaluation: LASSO_1se, n = 14
+grid_lasso_1se <- h2o.loadGrid(grid_path = "xgb_new/LASSO_1se/LASSO_1se")
+summary(grid_lasso_1se)
+sortedgrid <- h2o.getGrid(grid_lasso_1se@grid_id, sort_by = "auc", decreasing = T)
+summary(sortedgrid) # LASSO_1se_model_4 - AUC: 0.94279
+
+# Loading the best model: LASSO_1se_model_4
+LASSO_1se_model_4 <- h2o.loadModel(path = "xgb_new/LASSO_1se/LASSO_1se_model_4")
+
+# Predicting on test data
+i = 11
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+scaled_test$fireprob_xgbr14 <- as.data.frame(h2o.predict(object = LASSO_1se_model_4, newdata = test_H2O))$p1
+auc11 <- roc(fire_points ~ fireprob_xgbr14, data = scaled_test)
+auc11$auc # AUC: 0.9239
+```
+
+---
+
+### STEP 7 - ROC CURVES OF THE 4 BEST MODELS
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading the best model for DRF: RFE_rvif_f_model_7
+RFE_rvif_f_model_7 <- h2o.loadModel(path = "DRF_no_bdt/RFE_rvif_f/RFE_rvif_f_model_7")
+i = 8
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+DRF <- h2o.performance(model = RFE_rvif_f_model_7, newdata = test_H2O)
+
+# Loading the best model for GBM: RFE_rvif_f_model_33
+RFE_rvif_f_model_33 <- h2o.loadModel(path = "GBM/RFE_rvif_f/RFE_rvif_f_model_33")
+i = 8
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+GBM <- h2o.performance(model = RFE_rvif_f_model_33, newdata = test_H2O)
+
+# Loading the best model for MLR: LASSO_1se, n = 14
+model_lasso_1se <- h2o.loadModel(path = "MLR/MLR_LASSO_1se")
+i = 11
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+MLR <- h2o.performance(model = model_lasso_1se, newdata = test_H2O)
+
+# Loading the best model for XGBoost: RFE_pvif_f_model_4
+RFE_pvif_f_model_4 <- h2o.loadModel(path = "xgb_new/RFE_pvif_f/RFE_pvif_f_model_4")
+i = 6
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+XGB <- h2o.performance(model = RFE_pvif_f_model_4, newdata = test_H2O)
+
+# As H2O does not have an in-built function to plot multiple ROC curves yet, the following workaround is based on this solution: https://stackoverflow.com/questions/44034944/how-to-directly-plot-roc-of-h2o-model-object-in-r
+
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(tibble)
+library(tidyverse)
+
+multi_roc <- list(RFE_pvif_f_model_4, RFE_rvif_f_model_7, RFE_rvif_f_model_33, model_lasso_1se) %>%
+  map(function(x) x %>% h2o.performance(newdata = test_H2O, valid=T) %>% 
+        .@metrics %>% .$thresholds_and_metric_scores %>%
+        .[c('tpr','fpr')] %>%
+        add_row(tpr=0,fpr=0,.before=T) %>% 
+        add_row(tpr=0,fpr=0,.before=F)) %>%
+  map2(c('XGBoost-RFE-pVIF-F', 'DRF-RFE-rVIF-F','GBM-RFE-rVIF-F','MLR-Lasso-lambda.1se'),
+        function(x,y) x %>% add_column(model=y)) %>%
+  reduce(rbind) %>%
+  ggplot(aes(fpr,tpr,col=model))+
+  geom_line()+
+  geom_segment(aes(x=0,y=0,xend = 1, yend = 1),linetype = 2,col='grey')+
+  xlab('False Positive Rate')+
+  ylab('True Positive Rate')+
+  ggtitle('The ROC Curves for our Four Best Models')
+ggsave(filename = "multi_roc.png", plot = multi_roc, dpi = 300, width = 6, height = 4)
+```
+
+---
+
+### STEP 8 - VARIABLE IMPORTANCE
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Initiating H2O
+h2o.init(nthreads = -1, max_mem_size = "5G", enable_assertions = F)
+h2o.removeAll()
+
+# Loading the best model for XGBoost: RFE_pvif_f_model_4
+RFE_pvif_f_model_4 <- h2o.loadModel(path = "xgb_new/RFE_pvif_f/RFE_pvif_f_model_4")
+h2o.varimp_plot(model = RFE_pvif_f_model_4, num_of_features = 19)
+h2o.shutdown()
+```
+
+---
+
+### STEP 9 - GLOBAL/LOCAL SHAP SUMMARY PLOTS
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Initiating H2O
+h2o.init(nthreads = -1, max_mem_size = "5G", enable_assertions = F)
+h2o.removeAll()
+
+# Global SHAP
+
+# Loading the best model for XGBoost: RFE_pvif_f_model_4
+RFE_pvif_f_model_4 <- h2o.loadModel(path = "xgb_new/RFE_pvif_f/RFE_pvif_f_model_4")
+i = 6
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_global <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O)
+gshap <- shap_global +
+  scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for the Carpathians") +
+  theme(
+    plot.title = element_text(size = 16),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+gshap
+ggsave(filename = "gshap_v2.png", plot = gshap, dpi = 300, width = 10, height = 8)
+
+# SHAP plot for a single region (Borski, Serbia)
+
+scaled_test_borski <- scaled_test[scaled_test$new_region == "Borski",]
+i = 6
+test_H2O_borski <- as.h2o(scaled_test_borski[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4,
+                                     newdata = test_H2O_borski,
+                                     top_n_features = 10)
+cshap <- shap_county +
+  scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Borski county, Serbia") +
+  theme(
+    plot.title = element_text(size = 16),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12) 
+  )
+cshap
+ggsave(filename = "cshap_v2.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Local SHAP
+
+# Choosing a fire coordinate near Bekölce, Heves county, Hungary (N48.0834, E20.279)
+shap_coord <- scaled_training[scaled_training$fire_points == 1 & scaled_training$new_region == "Heves" & scaled_training$acq_date == "2020-04-22",]
+shap_coord <- as.h2o(x = shap_coord[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_local <- h2o.shap_explain_row_plot(model = RFE_pvif_f_model_4,
+                                        newdata = shap_coord,
+                                        row_index = 1,
+                                        top_n_features = 19)
+shap_local
+# Changing color scheme
+shap_local$layers[[1]]$aes_params$fill <- NULL
+lshap <- shap_local +
+  aes(fill = contribution < 0) +
+  scale_fill_manual(values = c("TRUE" = "#FFD700", "FALSE" = "#B0190F")) +
+  ggtitle("Local SHAP explanation\nfor coordinates N48.0834, E20.2790") +
+  theme(
+    plot.title = element_text(size = 16),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12) 
+  )
+lshap
+ggsave(filename = "lshap_v2.png", plot = lshap, dpi = 300, width = 6, height = 4)
+h2o.shutdown()
+```
+
+---
+
+### STEP 10 - SHAP SUMMARY PLOTS FOR EACH REGION
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Borski, SR
+scaled_test_borski <- scaled_test[scaled_test$new_region == "Borski",]
+i = 6
+test_H2O_borski <- as.h2o(scaled_test_borski[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_borski, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Borski county, Serbia")
+cshap
+ggsave(filename = "cshap.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Branicevski, SR
+scaled_test_bra <- scaled_test[scaled_test$new_region == "Braničevski",]
+i = 6
+test_H2O_bra <- as.h2o(scaled_test_bra[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_bra, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Branicevski county, Serbia")
+cshap
+ggsave(filename = "cshap_bra.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# BAZ, HU
+scaled_test_baz <- scaled_test[scaled_test$new_region == "Borsod-Abaúj-Zemplén",]
+i = 6
+test_H2O_baz <- as.h2o(scaled_test_baz[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_baz, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Borsod-Abaúj-Zemplén county, Hungary")
+cshap
+ggsave(filename = "cshap_baz.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Heves, HU
+scaled_test_heves <- scaled_test[scaled_test$new_region == "Heves",]
+i = 6
+test_H2O_heves <- as.h2o(scaled_test_heves[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_heves, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Heves county, Hungary")
+cshap
+ggsave(filename = "cshap_heves.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Nógrád, HU
+scaled_test_nógrád <- scaled_test[scaled_test$new_region == "Nógrád",]
+i = 6
+test_H2O_nógrád <- as.h2o(scaled_test_nógrád[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_nógrád, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Nógrád county, Hungary")
+cshap
+ggsave(filename = "cshap_nógrád.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Lesser Poland, PL
+scaled_test_lp <- scaled_test[scaled_test$new_region == "Lesser Poland",]
+i = 6
+test_H2O_lp <- as.h2o(scaled_test_lp[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_lp, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Malopolskie county, Poland")
+cshap
+ggsave(filename = "cshap_lp.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Silesian, PL
+scaled_test_sl <- scaled_test[scaled_test$new_region == "Silesian",]
+i = 6
+test_H2O_sl <- as.h2o(scaled_test_sl[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_sl, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Slaskie county, Poland")
+cshap
+ggsave(filename = "cshap_sl.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Subcarpathian, PL
+scaled_test_sub <- scaled_test[scaled_test$new_region == "Subcarpathian",]
+i = 6
+test_H2O_sub <- as.h2o(scaled_test_sub[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_sub, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Podkarpackie county, Poland")
+cshap
+ggsave(filename = "cshap_sub.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Czechia
+scaled_test_cz <- scaled_test[scaled_test$new_region == "Czech Republic",]
+i = 6
+test_H2O_cz <- as.h2o(scaled_test_cz[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_cz, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Czechia")
+cshap
+ggsave(filename = "ctryshap_cz.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Slovakia
+scaled_test_sk <- scaled_test[scaled_test$new_region == "Slovakia",]
+i = 6
+test_H2O_sk <- as.h2o(scaled_test_sk[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_sk, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Slovakia")
+cshap
+ggsave(filename = "ctryshap_sk.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Chernivtsi, UA
+scaled_test_ce <- scaled_test[scaled_test$new_region == "Chernivtsi",]
+i = 6
+test_H2O_ce <- as.h2o(scaled_test_ce[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_ce, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Chernivtsi, Ukraine")
+cshap
+ggsave(filename = "cshap_ce.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Ivano-Frankivs'k, UA
+scaled_test_if <- scaled_test[scaled_test$new_region == "Ivano-Frankivs'k",]
+i = 6
+test_H2O_if <- as.h2o(scaled_test_if[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_if, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Ivano-Frankivs'k, Ukraine")
+cshap
+ggsave(filename = "cshap_if.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# L'viv, UA
+scaled_test_lviv <- scaled_test[scaled_test$new_region == "L'viv",]
+i = 6
+test_H2O_lviv <- as.h2o(scaled_test_lviv[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_lviv, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for L'viv, Ukraine")
+cshap
+ggsave(filename = "cshap_lviv.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Transcarpathia, UA
+scaled_test_tr <- scaled_test[scaled_test$new_region == "Transcarpathia",]
+i = 6
+test_H2O_tr <- as.h2o(scaled_test_tr[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_tr, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Transcarpathia, Ukraine")
+cshap
+ggsave(filename = "cshap_tr.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Argeș, RO
+scaled_test_arges <- scaled_test[scaled_test$new_region == "Argeș",]
+i = 6
+test_H2O_arges <- as.h2o(scaled_test_arges[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_arges, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Argeș, Romania")
+cshap
+ggsave(filename = "cshap_arges.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Bacău, RO
+scaled_test_bacau <- scaled_test[scaled_test$new_region == "Bacău",]
+i = 6
+test_H2O_bacau <- as.h2o(scaled_test_bacau[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_bacau, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Bacău, Romania")
+cshap
+ggsave(filename = "cshap_bacau.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Bistrița-Năsăud, RO
+scaled_test_bn <- scaled_test[scaled_test$new_region == "Bistrița-Năsăud",]
+i = 6
+test_H2O_bn <- as.h2o(scaled_test_bn[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_bn, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Bistrița-Năsăud, Romania")
+cshap
+ggsave(filename = "cshap_bn.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Brașov, RO
+scaled_test_br <- scaled_test[scaled_test$new_region == "Brașov",]
+i = 6
+test_H2O_br <- as.h2o(scaled_test_br[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_br, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Brașov, Romania")
+cshap
+ggsave(filename = "cshap_br.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Buzău, RO
+scaled_test_bu <- scaled_test[scaled_test$new_region == "Buzău",]
+i = 6
+test_H2O_bu <- as.h2o(scaled_test_bu[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_bu, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Buzău, Romania")
+cshap
+ggsave(filename = "cshap_bu.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Caraș-Severin, RO
+scaled_test_cs <- scaled_test[scaled_test$new_region == "Caraș-Severin",]
+i = 6
+test_H2O_cs <- as.h2o(scaled_test_cs[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_cs, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Caraș-Severin, Romania")
+cshap
+ggsave(filename = "cshap_cs.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Covasna, RO
+scaled_test_co <- scaled_test[scaled_test$new_region == "Covasna",]
+i = 6
+test_H2O_co <- as.h2o(scaled_test_co[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_co, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Covasna, Romania")
+cshap
+ggsave(filename = "cshap_co.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Dâmbovița, RO
+scaled_test_damb <- scaled_test[scaled_test$new_region == "Dâmbovița",]
+i = 6
+test_H2O_damb <- as.h2o(scaled_test_damb[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_damb, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Dâmbovița, Romania")
+cshap
+ggsave(filename = "cshap_damb.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Gorj, RO
+scaled_test_gorj <- scaled_test[scaled_test$new_region == "Gorj",]
+i = 6
+test_H2O_gorj <- as.h2o(scaled_test_gorj[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_gorj, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Gorj, Romania")
+cshap
+ggsave(filename = "cshap_gorj.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Harghita, RO
+scaled_test_har <- scaled_test[scaled_test$new_region == "Harghita",]
+i = 6
+test_H2O_har <- as.h2o(scaled_test_har[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_har, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Harghita, Romania")
+cshap
+ggsave(filename = "cshap_har.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Hunedoara, RO
+scaled_test_hun <- scaled_test[scaled_test$new_region == "Hunedoara",]
+i = 6
+test_H2O_hun <- as.h2o(scaled_test_hun[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_hun, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Hunedoara, Romania")
+cshap
+ggsave(filename = "cshap_hun.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Maramureș, RO
+scaled_test_mar <- scaled_test[scaled_test$new_region == "Maramureș",]
+i = 6
+test_H2O_mar <- as.h2o(scaled_test_mar[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_mar, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Maramureș, Romania")
+cshap
+ggsave(filename = "cshap_mar.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Mehedinți, RO
+scaled_test_meh <- scaled_test[scaled_test$new_region == "Mehedinți",]
+i = 6
+test_H2O_meh <- as.h2o(scaled_test_meh[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_meh, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Mehedinți, Romania")
+cshap
+ggsave(filename = "cshap_meh.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Mureș, RO
+scaled_test_mures <- scaled_test[scaled_test$new_region == "Mureș",]
+i = 6
+test_H2O_mures <- as.h2o(scaled_test_mures[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_mures, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Mureș, Romania")
+cshap
+ggsave(filename = "cshap_mures.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Neamț, RO
+scaled_test_n <- scaled_test[scaled_test$new_region == "Neamț",]
+i = 6
+test_H2O_n <- as.h2o(scaled_test_n[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_n, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Neamț, Romania")
+cshap
+ggsave(filename = "cshap_n.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Prahova, RO
+scaled_test_pr <- scaled_test[scaled_test$new_region == "Prahova",]
+i = 6
+test_H2O_pr <- as.h2o(scaled_test_pr[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_pr, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Prahova, Romania")
+cshap
+ggsave(filename = "cshap_pr.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Sibiu, RO
+scaled_test_sib <- scaled_test[scaled_test$new_region == "Sibiu",]
+i = 6
+test_H2O_sib <- as.h2o(scaled_test_sib[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_sib, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Sibiu, Romania")
+cshap
+ggsave(filename = "cshap_sib.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Suceava, RO
+scaled_test_suc <- scaled_test[scaled_test$new_region == "Suceava",]
+i = 6
+test_H2O_suc <- as.h2o(scaled_test_suc[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_suc, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Suceava, Romania")
+cshap
+ggsave(filename = "cshap_suc.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Vâlcea, RO
+scaled_test_val <- scaled_test[scaled_test$new_region == "Vâlcea",]
+i = 6
+test_H2O_val <- as.h2o(scaled_test_val[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_val, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Vâlcea, Romania")
+cshap
+ggsave(filename = "cshap_val.png", plot = cshap, dpi = 300, width = 6, height = 4)
+
+# Vrancea, RO
+scaled_test_vra <- scaled_test[scaled_test$new_region == "Vrancea",]
+i = 6
+test_H2O_vra <- as.h2o(scaled_test_vra[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_county <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_vra, top_n_features = 10)
+cshap <- shap_county + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Global SHAP plot for Vrancea, Romania")
+cshap
+ggsave(filename = "cshap_vra.png", plot = cshap, dpi = 300, width = 6, height = 4)
+```
+
+---
+
+### STEP 11 - SHAP SUMMARY PLOTS FOR EACH COUNTRY
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Ukraine
+scaled_test_ua <- scaled_test[scaled_test$new_region %in% c("Ivano-Frankivs'k", "L'viv", "Chernivtsi", "Transcarpathia"),]
+i = 6
+test_H2O_ua <- as.h2o(scaled_test_ua[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_country <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_ua, top_n_features = 10)
+ctryshap <- shap_country + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Ukraine")
+ctryshap
+ggsave(filename = "ctryshap_ua.png", plot = ctryshap, dpi = 300, width = 6, height = 4)
+
+# Hungary
+scaled_test_hu <- scaled_test[scaled_test$new_region %in% c("Nógrád", "Heves", "Borsod-Abaúj-Zemplén"),]
+i = 6
+test_H2O_hu <- as.h2o(scaled_test_hu[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_country <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_hu, top_n_features = 10)
+ctryshap <- shap_country + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Hungary")
+ctryshap
+ggsave(filename = "ctryshap_hu.png", plot = ctryshap, dpi = 300, width = 6, height = 4)
+
+# Serbia
+scaled_test_sr <- scaled_test[scaled_test$new_region %in% c("Borski", "Braničevski"),]
+i = 6
+test_H2O_sr <- as.h2o(scaled_test_sr[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_country <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_sr, top_n_features = 10)
+ctryshap <- shap_country + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Serbia")
+ctryshap
+ggsave(filename = "ctryshap_sr.png", plot = ctryshap, dpi = 300, width = 6, height = 4)
+
+# Poland
+scaled_test_pl <- scaled_test[scaled_test$new_region %in% c("Lesser Poland", "Silesian", "Subcarpathian"),]
+i = 6
+test_H2O_pl <- as.h2o(scaled_test_pl[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_country <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_pl, top_n_features = 10)
+ctryshap <- shap_country + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Poland")
+ctryshap
+ggsave(filename = "ctryshap_pl.png", plot = ctryshap, dpi = 300, width = 6, height = 4)
+
+# Romania
+scaled_test_ro <- scaled_test[scaled_test$new_region %in% c("Argeș", "Bacău", "Bistrița-Năsăud", "Brașov", "Buzău", "Caraș-Severin", "Covasna", "Dâmbovița", "Gorj", "Harghita", "Hunedoara", "Maramureș", "Mehedinți", "Mureș", "Neamț", "Prahova", "Sibiu", "Suceava", "Vâlcea", "Vrancea"),]
+i = 6
+test_H2O_ro <- as.h2o(scaled_test_ro[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_country <- h2o.shap_summary_plot(model = RFE_pvif_f_model_4, newdata = test_H2O_ro, top_n_features = 10)
+ctryshap <- shap_country + scale_color_gradient(low = "#FFD700", high = "#B0190F") +
+  ggtitle("Romania")
+ctryshap
+ggsave(filename = "ctryshap_ro.png", plot = ctryshap, dpi = 300, width = 6, height = 4)
+
+# Czechia and Slovakia are in Step10
+```
+
+---
+
+### STEP 12 - CORRELATION COEFFICIENTS
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Acquiring SHAP contribution values for the test set and saving it into the shap_contributions data frame
+i = 6
+test_H2O <- as.h2o(scaled_test[,c(6, match(features[[i]], colnames(scaled_training)))])
+
+shap_vals <- h2o.predict_contributions(object = RFE_pvif_f_model_4, newdata = test_H2O, top_n = 19)
+shap_contributions_df <- as.data.frame(shap_vals)
+# saveRDS(object = shap_contributions_df, file = "shap_contributions_df.rds")
+
+# Changing factors to characters
+for(i in seq(from = 1, to = 37, by = 2)) shap_contributions_df[,i] = as.character(shap_contributions_df[,i])
+
+# Saving the variables' names in a vector
+variables <- unlist(shap_contributions_df[1, seq(from = 1, to = 37, by = 2)])
+
+# Rearranging the data frame 
+contrib_organised <- t(apply(shap_contributions_df, 1, FUN = function(x){
+  temp = x[seq(from = 2, to = 38, by = 2)]
+  names(temp) = x[seq(from = 1, to = 37, by = 2)]
+  temp = temp[variables]
+  temp
+}))
+
+# Changing character to numeric
+class(contrib_organised) <- "numeric"
+
+# Changing to data frame
+contrib_organised <- as.data.frame(contrib_organised)
+# saveRDS(object = contrib_organised, file = "contrib_organised.rds")
+
+# Copying metadata from scaled_test data frame into contrib_organised
+contrib_organised <- cbind.data.frame(contrib_organised, scaled_test[,c(1:6)])
+contrib_organised <- contrib_organised[,c(20:25,1:19)]
+
+# Only keeping fire points for further analysis (= 1035)
+contrib_fire <- contrib_organised[contrib_organised$fire_points == "1",]
+
+# Adjusting date columns
+contrib_fire$acq_date <- as.Date(gsub("\\.","-", contrib_fire$acq_date))
+ # Year
+contrib_fire$acq_year <- substr(contrib_fire$acq_date, 1, 4)
+ # Arranging columns
+contrib_fire <- contrib_fire[,c(1:3,26,4:25)]
+ # Month
+contrib_fire$acq_month <- substr(contrib_fire$acq_date,6,7)
+ # Season
+season <- cbind(c('01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'), 
+                c('wt', 'wt', 'sp', 'sp', 'sp', 'sm', 'sm', 'sm', 'at', 'at', 'at', 'wt')) 
+colnames(season) <- c("month", "season") 
+season <- as.data.frame(season)
+contrib_fire$season <- season$season[match(contrib_fire$acq_month, season$month)]
+contrib_fire$season[contrib_fire$season == "sp"] <- "01"
+contrib_fire$season[contrib_fire$season == "sm"] <- "02"
+contrib_fire$season[contrib_fire$season == "at"] <- "03"
+contrib_fire$season[contrib_fire$season == "wt"] <- "04"
+ # For more visualization (for further analysis not present in the current paper)
+contrib_fire$acq_year_season <- paste0(contrib_fire$acq_year, "-", contrib_fire$season)
+ # Rearranging columns
+contrib_fire <- contrib_fire[,c(1:4,27:29,5:26)]
+# Saving df
+# saveRDS(object = contrib_fire, file = "contrib_fire.rds")
+#-----
+
+# Analysis of correlation coefficients between SHAP and actual feature values
+ # Actual feature values
+test_corr <- scaled_test[scaled_test$fire_points == "1", c(match(features[[i]], colnames(scaled_training)))]
+ # SHAP values
+contrib_corr <- contrib_fire[, c(28,16,14,13,21,11,29,17,23,12,26,19,27,25,22,20,15,24,18)]
+ # Calculation of pairwise correlation
+corr_diagonal <- as.data.frame(diag(cor(test_corr, contrib_corr, method = "spearman")))
+corr_diagonal$variable <- rownames(corr_diagonal)
+colnames(corr_diagonal) <- c("coefficients", "variable")
+rownames(corr_diagonal) <- NULL
+corr_diagonal <- corr_diagonal[,2:1]
+# saveRDS(object = corr_diagonal, file = "corr_diagonal.rds")
+
+# Visualization on bar chart
+png(filename = "plot_corr_diagonal.png", width = 1250, height = 1000, res = 300)
+ggplot(corr_diagonal, aes(x = coefficients, y = reorder(variable, coefficients))) +
+  geom_bar(aes(fill = coefficients), stat = "identity") +
+  labs(x = "Correlation Coefficient",
+       y = "Feature") +
+  scale_fill_gradient2(low = "#B0190F", mid = "#FFD700", high = "#B0190F") +
+  theme_minimal() +
+  theme(axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        plot.title = element_blank(),
+        legend.position = "none")
+dev.off()
+```
