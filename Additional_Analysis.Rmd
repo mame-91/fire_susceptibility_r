@@ -1,0 +1,461 @@
+---
+title: "Additional Analysis"
+author: "Melinda Manczinger"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+# 1. Validation of negative controls
+
+## Spatial overlap
+
+Loading temporally independent fire points from [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading archive/scientific data and near real-time data
+archive <- list.files(path = "Datasets", pattern = "archive", all.files = T, full.names = T, recursive = T)
+nrt <- list.files(path = "Datasets", pattern = "nrt", all.files = T, full.names = T, recursive = T)
+
+archive <- lapply(archive, read.csv, header = T, sep = ",")
+nrt <- lapply(nrt, read.csv, header = T, sep = ",")
+
+archive <- do.call(rbind.data.frame, archive) # 80,801 points
+nrt <- do.call(rbind.data.frame, nrt) # 7,118 points
+nrt$type <- NA
+
+modis <- rbind.data.frame(archive, nrt) # 87,919 points
+hist(modis$confidence)
+
+fire_points <- modis[modis$confidence >= 80,] # filter for confidence variable: only retaining high confidence points
+hist(fire_points$confidence) # 17,634 data points at this stage between 2021-2025
+
+# saveRDS(object = fire_points, file = "fire_points_20210101_20250501.rds")
+fire_points <- read_rds("fire_points_20210101_20250501.rds")
+```
+
+Loading original data set with negative controls
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Loading data
+load(file = "/Users/manczingermelinda/Desktop/Forest_project/I. DATA PREPARATION/FOR DATAVERSE UPLOAD/all_points.RData")
+
+# Subsetting to non-fire points
+control_points <- all_points[all_points$fire_points == 0,]
+```
+
+Checking matching location points between the two objects
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 1 - Checking with numeric data type
+library(dplyr)
+
+fp <- fire_points %>%
+  rename(lat = latitude, lon = longitude)
+fp <- fp[,1:2]
+
+cp <- control_points %>%
+  rename(lat = latitude, lon = longitude)
+cp <- cp[,1:2]
+
+# 4-digit accuracy in both objects
+fp <- fp %>%
+  mutate(lat = round(lat, 4), lon = round(lon, 4))
+
+cp <- cp %>%
+  mutate(lat = round(lat, 4), lon = round(lon, 4))
+
+# Inner join
+overlap <- inner_join(cp, fp, by = c("lat", "lon")) # no matching coordinate
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 2 - Checking with character data type
+
+lat <- sprintf("%.4f", fp$lat)
+lon <- sprintf("%.4f", fp$lon)
+fp2 <- data.frame(lat = lat, lon = lon, stringsAsFactors = F)
+
+lat <- sprintf("%.4f", cp$lat)
+lon <- sprintf("%.4f", cp$lon)
+cp2 <- data.frame(lat = lat, lon = lon, stringsAsFactors = F)
+
+# Inner join
+overlap <- inner_join(cp2, fp2, by = c("lat", "lon")) # no matching coordinate
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 3 - Checking with intersect() function
+
+cp2$combined <- paste0(cp2$lat, cp2$lon)
+fp2$combined <- paste0(fp2$lat, fp2$lon)
+
+inters <- intersect(cp2$combined, fp2$combined) # character(0) - no matching coordinate
+```
+
+## Distance calculation
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(sf)
+
+# Converting to sf point objects
+cp_sf <- st_as_sf(cp, coords = c("lon", "lat"), crs = 4326) # WGS84
+fp_sf <- st_as_sf(fp, coords = c("lon", "lat"), crs = 4326)
+
+# 1 - Transforming to projected CRS
+cp_sf_proj <- st_transform(cp_sf, crs = 3035) # LAEA Europe
+fs_sf_proj <- st_transform(fp_sf, crs = 3035)
+
+# Calculating distance to nearest fire point for each control
+nearest_dist <- st_distance(cp_sf_proj, fs_sf_proj)
+
+# For each control point, get the shortest distance (in meters)
+cp_sf_proj$min_dist_to_fire_m <- apply(nearest_dist, 1, min)
+boxplot(cp_sf_proj$min_dist_to_fire_m)
+
+check <- cp_sf_proj[cp_sf_proj$min_dist_to_fire_m < 20000,]
+hist(check$min_dist_to_fire_m, breaks = 20)
+summary(cp_sf_proj$min_dist_to_fire_m)
+
+# saveRDS(object = cp_sf_proj, file = "cp_sf_proj.rds")
+
+# 2 - Transforming to unprojected CRS
+cp_sf_unproj <- st_transform(cp_sf, crs = 4326L)
+fs_sf_unproj <- st_transform(fp_sf, crs = 4326L)
+
+# Calculating distance to nearest fire point for each control
+nearest_dist <- st_distance(cp_sf_unproj, fs_sf_unproj)
+
+# For each control point, get the shortest distance (in meters)
+cp_sf_unproj$min_dist_to_fire_m <- apply(nearest_dist, 1, min)
+boxplot(cp_sf_unproj$min_dist_to_fire_m)
+
+check <- cp_sf_unproj[cp_sf_unproj$min_dist_to_fire_m < 20000,]
+hist(check$min_dist_to_fire_m)
+summary(cp_sf_unproj$min_dist_to_fire_m)
+
+# saveRDS(object = cp_sf_unproj, file = "cp_sf_unproj.rds")
+```
+
+## Wilcoxon test: Do fires (2021-2025) sit in higher probability hexagons?
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(sf)
+library(h3jsr)
+library(dplyr)
+library(ggplot2)
+
+# New independent data set
+fire_points <- read_rds("fire_points_20210101_20250501.rds") # 17,634
+
+# All H3 hexagons with probabilities
+all_h3_with_pred <- read_rds(file = "V. VULNERABILITY MAPPING/FOR DATAVERSE UPLOAD/scaled_all_h3_unique_with_pred.rds")
+
+# Loading the Carpathian shapefile
+roi <- read_sf("I. DATA PREPARATION/FOR DATAVERSE UPLOAD/Study area_shapefiles/all_regions_merge.shp")
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Assigning each fire point to an H3 cell
+fire_points_sf <- st_as_sf(fire_points, coords = c("longitude", "latitude"), crs = 4326)
+# Using the same H3 resolution as in modelling
+fire_points_sf$h3_address <- point_to_cell(input = fire_points_sf, res = 8)
+length(unique(fire_points_sf$h3_address)) # 15,924 unique hexagons, no missing H3
+
+# Keeping only fire points inside the region for which model produced a probability
+fires_within_roi <- fire_points_sf[fire_points_sf$h3_address %in% all_h3_with_pred$h3_address,] # 1,235
+length(unique(fires_within_roi$h3_address)) # 1,121 unique hexagons, no missing H3
+
+# Attaching model fire probability to every remaining point
+fires_within_roi$fireprob <- all_h3_with_pred$fireprob[match(fires_within_roi$h3_address, all_h3_with_pred$h3_address)]
+summary(fires_within_roi$fireprob) # OK - no missing
+
+# Building the fire and background data frames
+# Fire data frame:
+fire <- fires_within_roi[,c(15,16)]
+fire$fire_point <- 1
+fire <- fire[,c(4,1,2,3)]
+fire$geometry <- NULL
+
+# Background data frame = every H3 with a prediction except those with fires:
+background <- all_h3_with_pred[,c(1,25)]
+background$fire_point <- 0
+background <- background[,c(3,1,2)] # 386,885 points
+
+# Removing H3 cells from the background data where fires happened
+background <- background[!background$h3_address %in% fire$h3_address,] # 386,885-1,121 = 385,764
+
+# Combining the two
+combined <- bind_rows(fire, background)
+
+# Probability distribution test
+# H0: there is no difference between the two groups
+# H1: there is difference
+wilcox_result <- wilcox.test(fireprob ~ fire_point, data = combined, exact = FALSE)
+wilcox_result
+# Wilcoxon rank sum test with continuity correction
+# data:  fireprob by fire_point
+# W = 120950487, p-value < 2.2e-16
+# alternative hypothesis: true location shift is not equal to 0
+
+# Boxplot
+x <- ggplot(combined, aes(x  = factor(fire_point, levels = c(0, 1),
+                                      labels = c("background H3", "fire H3")),
+                          y  = fireprob,
+                          fill = factor(fire_point),
+                          colour = factor(fire_point))) +
+  geom_boxplot(outlier.shape = NA, width = 0.6, alpha  = 0.6) +
+  scale_fill_manual(values = c("grey75", "#F6412D"),
+                    guide  = "none") +
+  scale_colour_manual(values = c("grey25", "#D52D00"),
+                      guide  = "none") +
+  annotate(geom = "text", x = 2.5, y = 0.18, label = "Wilcoxon test, p < 2.2e-16", size = 4, color = "#F0DFC8") +
+  labs(x = NULL,
+       y = "Predicted fire probability") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title = element_text(color = "#F0DFC8"),
+    axis.text = element_text(color = "#F0DFC8"),
+    axis.ticks = element_line(color = "#F0DFC8"),
+    plot.background = element_rect(fill = NA, color = NA),
+    panel.background = element_rect(fill = NA, color = NA)) +
+  coord_flip()
+x
+ggsave(filename = "x_new.jpeg", plot = x, device = "jpeg", dpi = 600, units = "cm", width = 14, height = 5, bg = NULL)
+
+# png("transparent_plot.png", width = 3500, height = 1200, res = 600, bg = "transparent")
+# print(x)
+# dev.off()
+```
+
+## Fisher test: Are areas predicted as high-risk (probability > 0.5) more likely to experience fires in the validation period than areas predicted as low-risk?
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Creating binary variable: high risk if fire prob > 0.5
+
+# Fires - new (2021-2025)
+fires_new <- fires_within_roi[,14:16] # 1,235
+length(unique(fires_new$h3_address)) # 1,121
+fires_new$fire_point <- 1
+fires_new$geometry <- NULL
+
+# Fires - old (2010-2020)
+fires_old <- all_points[all_points$fire_points == 1,] # 5,173
+length(unique(fires_old$h3_address)) # 4,223
+
+# Background
+old_background <- all_h3_with_pred[, c(1,25)]
+old_background <- old_background[!old_background$h3_address %in% fires_old$h3_address,] # 20 hexagons missing
+old_background$fire_point <- 0
+
+combined <- bind_rows(old_background, fires_new)
+combined$high_risk <- combined$fireprob > 0.5
+
+# Contingency table: high risk vs. actual fire occurrence
+tab <- table(combined$high_risk, combined$fire_point)
+tab
+
+# Fisher's exact test
+fisher_result <- fisher.test(tab)
+fisher_result
+
+#	Fisher's Exact Test for Count Data
+# data:  tab
+# p-value < 2.2e-16
+# alternative hypothesis: true odds ratio is not equal to 1
+# 95 percent confidence interval:
+# 4.534174 5.847955
+# sample estimates:
+# odds ratio 
+#  5.144366
+
+# Calculating relative risk
+a <- tab[["TRUE", "1"]]
+b <- tab[["TRUE", "0"]]
+c <- tab[["FALSE", "1"]]
+d <- tab[["FALSE", "0"]]
+
+rr <- (a / (a + c)) / (b / (b + d))
+rr
+
+# A képlet  (a / (a+b)) / (c / (c+d)). Tehát azt nézzük, hogy a TRUE csoportban hányszorosa az 1 aránya a FALSE csoporthoz képest. Így sokkal nagyobb lett az RR.
+```
+
+# 2. Spatial patterns of elevated fire susceptibility
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(dplyr)
+library(sf)
+library(spdep)
+library(igraph)
+
+# Aggregating to county level (median probability)
+county_probs <- all_h3_with_pred %>%
+  group_by(loc) %>%
+  summarise(median_prob = median(fireprob, na.rm = TRUE)) %>%
+  ungroup()
+
+# Joining with spatial polygons
+counties_joined <- roi
+counties_joined$NAME_1[counties_joined$NAME_1 == "L'viv"] <- "Lviv"
+counties_joined$NAME_1[counties_joined$NAME_1 == "Transcarpathia"] <- "Zakarpattya"
+counties_joined$NAME_1[counties_joined$NAME_1 == "Ivano-Frankivs'k"] <- "Ivano-Frankivsk"
+
+counties_joined$median_prob <- county_probs$median_prob[match(counties_joined$NAME_1, county_probs$loc)]
+
+# Flagging high-risk counties (above global median 0.195)
+global_median <- median(all_h3_with_pred$fireprob, na.rm = TRUE)
+global_median # 0.194896
+
+counties_joined <- counties_joined %>%
+  mutate(high_risk = median_prob > global_median)
+
+# --------------------------------
+# Creating neighbour list with country barrier
+
+# Keeping only the high-risk counties for clustering
+high_risk_counties <- counties_joined %>% filter(high_risk)
+
+# Creating queen contiguity neighbour list
+nb <- poly2nb(high_risk_counties, queen = TRUE)
+
+# As the originally used multipolygon was wrongly created, I need to make some adjustments in the neighbour structure:
+  # Lviv has no neighbor now
+nb[[19]] <- c(18L,5L)
+  # Correcting Ivano-Frankivsk as well
+nb[[18]] <- c(17L,19L)
+  # Correcting Subcarpathian as well
+nb[[5]] <- c(19L)
+
+# --------------------------------
+# Dropping neighbour pairs that straddle a national border
+for (i in seq_along(nb)) {
+  nb[[i]] <- nb[[i]][high_risk_counties$NAME_0[nb[[i]]] == high_risk_counties$NAME_0[i]]
+}
+
+# I have 4 singletons (= counties which do not have adjacent neighbours):
+
+# [4] - Poland: Silesian
+# [5] - Poland: Subcarpathian
+# [10] - Romania: Mehedinți
+# [16] - Slovakia: Košický
+
+# Manually removing singletons to be able to run the rest of the code
+nb_n <- lengths(nb)
+high_risk_counties <- high_risk_counties %>% 
+  mutate(singleton = ifelse(nb_n == 0, "yes", "no"))
+
+singletons <- filter(high_risk_counties, singleton == "yes")
+no_singletons <- filter(high_risk_counties, singleton == "no")
+
+# Creating queen contiguity neighbour list
+nb2 <- poly2nb(no_singletons, queen = TRUE)
+
+# As the originally used multipolygon was wrongly created, I need to make some adjustments in the neighbour structure:
+  # Lviv has no neighbor now
+nb2[[15]] <- c(14L)
+  # Correcting Ivano-Frankivsk as well
+nb2[[14]] <- c(13L, 15L)
+
+# --------------------------------
+# Identifying connected components
+comp <- n.comp.nb(nb2)
+
+# Attaching cluster numbers
+no_singletons$cluster_id <- comp$comp.id
+
+# --------------------------------
+# Assigning a unique cluster_id to each singleton
+next_id <- max(no_singletons$cluster_id, na.rm = TRUE) + 1
+singleton_ids <- seq(next_id, length.out = nrow(singletons))
+singletons$cluster_id  <- singleton_ids
+
+# Recombining the two tables
+high_risk_with_clusters <- bind_rows(no_singletons, singletons)
+
+# Sanity check
+table(high_risk_with_clusters$cluster_id)
+
+# saveRDS(object = high_risk_with_clusters, file = "high_risk_with_clusters.rds")
+```
+
+# 3. Spatial autocorrelation
+
+## Option 1
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# --------------------------------
+# Loading packages
+library(spdep)
+library(sfdep)
+library(sf)
+library(dplyr)
+library(h3r)
+# --------------------------------
+# Loading data
+# All H3 hexagons with probabilities
+all_h3_with_pred <- read_rds(file = "V. VULNERABILITY MAPPING/FOR DATAVERSE UPLOAD/scaled_all_h3_unique_with_pred.rds")
+
+# Original fire/non-fire points
+load(file = "/Users/manczingermelinda/Desktop/Forest_project/I. DATA PREPARATION/FOR DATAVERSE UPLOAD/all_points.RData")
+
+# Counting all sample points per hex (n_i)
+pts_per_hex <- all_points %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  mutate(h3_address = point_to_cell(geometry, res = 8)) %>%
+  st_drop_geometry() %>%
+  count(h3_address, name = "n_points")
+
+# From these: fires per hex (y_i)
+fires_old <- all_points[all_points$fire_points == 1, ] %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  mutate(h3_address = point_to_cell(geometry, res = 8)) %>%
+  st_drop_geometry() %>%
+  count(h3_address, name = "n_fire") %>%
+  mutate(obs_fire = 1)
+
+# Merging (y_i = n_fire and n_i = n_points)
+hex <- all_h3_with_pred %>%
+  left_join(fires_old, by = "h3_address") %>%
+  left_join(pts_per_hex, by = "h3_address") %>%
+  mutate(
+    n_fire = tidyr::replace_na(n_fire, 0), # 5,173-5,152 = 21 is missing
+    n_points = tidyr::replace_na(n_points, 0) # 4,223-4,203 = 20 is missing
+    )
+# --------------------------------
+# Pearson-standardised residuals
+#     r_i = ( y_i – n_i p_i ) / sqrt( n_i p_i (1 – p_i) )
+#     We set r_i = NA where formula is undefined (n_i = 0 or p_i = 0/1)
+
+hex <- hex %>%
+  mutate(
+  resid_p = ifelse(
+    n_points > 0 & fireprob > 0 & fireprob < 1,
+    (n_fire - n_points * fireprob) /
+      sqrt(n_points * fireprob * (1 - fireprob)),
+    NA_real_
+  )
+)
+# --------------------------------
+# Converting to an sf object with polygon geometries
+hex_sf <- hex %>%
+  filter(!is.na(resid_p)) %>%
+  mutate(geometry = st_sfc(
+           cell_to_polygon(h3_address, simple = TRUE), crs = 4326)) %>%
+  st_as_sf()
+# --------------------------------
+# Building neighbour list (queen) and row-standardised weights
+nb <- poly2nb(hex_sf, queen = TRUE)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+# --------------------------------
+# Global Moran's I on the Pearson residuals
+moran_res <- moran.test(hex_sf$resid_p, lw, zero.policy = TRUE)
+print(moran_res)
+```
+
+## MC randomization (9,999 permutations)
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+set.seed(100)
+moran_mc  <- moran.mc(hex_sf$resid_p, lw, nsim = 9999, zero.policy = TRUE)
+print(moran_mc)
+```
