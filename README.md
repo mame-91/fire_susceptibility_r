@@ -1,0 +1,1 @@
+This repository contains all related R codes and the compiled dataset for the paper "Fire susceptibility assessment in the Carpathians using an interpretable framework" by Manczinger, M., Kovács, L., & Kovács, T. (2025), Scientific Reports, DOI 10.1038/s41598-025-10296-4. 
